@@ -10,9 +10,8 @@ Run:
     python app.py
     Then open http://localhost:8000 in your browser.
 
-IB Gateway / TWS must be running with API connections enabled.
-Ports:  TWS paper=7497  |  TWS live=7496
-        IB Gateway paper=4002  |  IB Gateway live=4001
+IB Gateway must be running with API connections enabled.
+Ports:  IB Gateway paper=4002  |  IB Gateway live=4001
 """
 
 from __future__ import annotations
@@ -180,7 +179,7 @@ app = FastAPI(title="IB Order Manager", lifespan=lifespan)
 
 class ConnectRequest(BaseModel):
     host: str = "127.0.0.1"
-    port: int = 7497
+    port: int = 4002
     client_id: int = 1
 
 
