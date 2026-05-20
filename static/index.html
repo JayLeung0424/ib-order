@@ -252,7 +252,7 @@
   </div>
   <!-- Auto-refresh toggle -->
   <div class="toggle-row">
-    <div id="sw" class="sw" onclick="toggleAuto()" title="Auto-refresh every 3 s"></div>
+    <div id="sw" class="sw" onclick="toggleAuto()" title="Auto-refresh every 1 s"></div>
     Auto
   </div>
   <button class="btn" onclick="refreshAll()" title="Manual refresh">↻ Refresh</button>
@@ -685,7 +685,7 @@ async function toggleAutoClose() {
     await api('POST', '/api/autoclose', { enabled: autoCloseOn });
     setAutoCloseUI(autoCloseOn);
     toast(autoCloseOn
-      ? '收市平倉已啟動 — 15:55 ET 自動市價平倉'
+      ? '收市平倉已啟動 — 15:57 取消掛單 · 15:58 市價平倉'
       : '收市平倉已停用', autoCloseOn ? 'err' : 'info');
   } catch(e) {
     autoCloseOn = !autoCloseOn; // revert on error
@@ -1029,7 +1029,7 @@ function esc(s) {
     .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 function clearDisplay() {
-  document.getElementById('tb-pos-body').innerHTML = '<tr><td colspan="9" class="empty">Connect to IB to view positions</td></tr>';
+  document.getElementById('tb-pos-body').innerHTML = '<tr><td colspan="10" class="empty">Connect to IB to view positions</td></tr>';
   document.getElementById('tb-ord-body').innerHTML = '<tr><td colspan="9" class="empty">Connect to IB to view orders</td></tr>';
   ['c-netliq','c-cash','c-bp','c-avail','c-upnl','c-rpnl','c-gpv']
     .forEach(id => { const e = document.getElementById(id); if(e) e.textContent = '—'; });

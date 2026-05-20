@@ -74,7 +74,8 @@ ib: IB  # assigned in lifespan startup
 
 # ---------------------------------------------------------------------------
 # Auto-close state
-# When enabled, all positions are closed at market price 5 min before close.
+# When enabled: at 15:57 ET all open orders are cancelled;
+#               at 15:58 ET all positions are closed at market price.
 # ---------------------------------------------------------------------------
 autoclose_enabled: bool = True
 _cancel_orders_fired_date   = None   # tracks 15:57 cancel-orders fire per calendar date
@@ -434,7 +435,7 @@ async def place_order(req: OrderRequest):
             bracket[1].tif = "DAY"
             bracket[2].tif = "DAY"
             if req.cancel_next_day_1pm:
-                # Cancel the entry if unfilled by 1 pm Eastern next day.
+                # Cancel the entry if unfilled by 1 pm Eastern today.
                 bracket[0].tif = "GTD"
                 bracket[0].goodTillDate = _next_day_1pm_eastern()
             else:
