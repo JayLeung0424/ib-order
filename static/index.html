@@ -1,0 +1,1068 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IB Order Manager</title>
+  <style>
+    /* ── Design tokens ─────────────────────────────────────────────── */
+    :root {
+      --bg:      #0d1117;
+      --bg2:     #161b22;
+      --bg3:     #21262d;
+      --border:  #30363d;
+      --text:    #e6edf3;
+      --muted:   #8b949e;
+      --blue:    #58a6ff;
+      --green:   #3fb950;
+      --red:     #f85149;
+      --yellow:  #e3b341;
+      --r:       6px;
+    }
+
+    /* ── Reset ─────────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 14px;
+      line-height: 1.5;
+      min-height: 100vh;
+    }
+
+    /* ── Navigation ────────────────────────────────────────────────── */
+    nav {
+      background: var(--bg2);
+      border-bottom: 1px solid var(--border);
+      padding: 0 20px;
+      height: 52px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+    .nav-brand { font-size: 15px; font-weight: 700; letter-spacing: -.3px; }
+    .nav-brand span { color: var(--blue); }
+    .nav-spacer { flex: 1; }
+
+    .status-pill {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--muted);
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 3px 10px;
+    }
+    .status-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--red);
+    }
+    .status-dot.on {
+      background: var(--green);
+      box-shadow: 0 0 5px var(--green);
+      animation: blink 2s ease-in-out infinite;
+    }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.5} }
+
+    /* ── Buttons ───────────────────────────────────────────────────── */
+    button { cursor: pointer; border: none; font-family: inherit; border-radius: var(--r); transition: filter .15s; }
+    button:hover { filter: brightness(1.15); }
+    button:disabled { opacity: .4; cursor: not-allowed; filter: none; }
+
+    .btn      { padding: 5px 13px; font-size: 12px; background: var(--bg3); color: var(--text); border: 1px solid var(--border); }
+    .btn-blue { padding: 5px 13px; font-size: 12px; background: var(--blue); color: #fff; }
+    .btn-live { padding: 5px 13px; font-size: 12px; background: var(--yellow); color: #000; font-weight: 600; }
+    .btn-buy  { padding: 9px 0; font-size: 13px; font-weight: 700; background: var(--green); color: #fff; width: 100%; border-radius: var(--r); }
+    .btn-sell { padding: 9px 0; font-size: 13px; font-weight: 700; background: var(--red);   color: #fff; width: 100%; border-radius: var(--r); }
+    .btn-xs-cancel { padding: 2px 8px; font-size: 11px; background: transparent; color: var(--red);  border: 1px solid rgba(248,81,73,.35); }
+    .btn-xs-edit   { padding: 2px 8px; font-size: 11px; background: transparent; color: var(--blue); border: 1px solid rgba(88,166,255,.35); }
+
+    /* ── Toggle (auto-refresh) ─────────────────────────────────────── */
+    .toggle-row { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+    .sw { width: 30px; height: 16px; background: var(--border); border-radius: 10px; position: relative; cursor: pointer; transition: background .2s; }
+    .sw.on    { background: var(--blue); }
+    .sw.ac-on { background: var(--red); animation: blink 2s ease-in-out infinite; }
+    .sw::after { content:''; position:absolute; width:12px; height:12px; background:#fff; border-radius:50%; top:2px; left:2px; transition:transform .2s; }
+    .sw.on::after    { transform: translateX(14px); }
+    .sw.ac-on::after { transform: translateX(14px); }
+
+    /* ── Layout ────────────────────────────────────────────────────── */
+    .page { max-width: 1440px; margin: 0 auto; padding: 18px 20px; }
+
+    /* Account summary strip */
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+    .card {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: var(--r);
+      padding: 14px 16px;
+    }
+    .card-label { font-size: 10px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin-bottom: 5px; }
+    .card-val   { font-size: 19px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .card-cur   { font-size: 11px; color: var(--muted); margin-top: 1px; }
+    .pos { color: var(--green); }
+    .neg { color: var(--red); }
+
+    /* Main two-column */
+    .main { display: grid; grid-template-columns: 300px 1fr; gap: 14px; }
+    @media (max-width: 860px) { .main { grid-template-columns: 1fr; } }
+
+    /* ── Panel ─────────────────────────────────────────────────────── */
+    .panel { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r); }
+    .panel-head {
+      padding: 11px 16px;
+      border-bottom: 1px solid var(--border);
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .5px;
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .panel-body { padding: 14px 16px; }
+
+    /* ── Form ──────────────────────────────────────────────────────── */
+    .fg { margin-bottom: 10px; }
+    .fg label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 3px; }
+    .fg input, .fg select {
+      width: 100%;
+      padding: 7px 9px;
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: var(--r);
+      color: var(--text);
+      font-size: 13px;
+      font-family: inherit;
+    }
+    .fg input:focus, .fg select:focus { outline: none; border-color: var(--blue); }
+    .fg input::placeholder { color: var(--muted); opacity: .6; }
+    .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .action-btns { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+    hr.sep { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+
+    /* ── Tabs ──────────────────────────────────────────────────────── */
+    .tabs { display: flex; border-bottom: 1px solid var(--border); padding: 0 16px; }
+    .tab {
+      padding: 10px 14px; background: none; color: var(--muted);
+      border-bottom: 2px solid transparent; border-radius: 0;
+      font-size: 13px; margin-bottom: -1px;
+    }
+    .tab:hover { color: var(--text); filter: none; }
+    .tab.active { color: var(--blue); border-bottom-color: var(--blue); }
+    .tab-pane { display: none; }
+    .tab-pane.active { display: block; }
+
+    /* ── Table ─────────────────────────────────────────────────────── */
+    .tbl-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    thead th {
+      padding: 9px 12px;
+      text-align: left;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: .5px;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+      font-weight: 700;
+    }
+    tbody tr { border-bottom: 1px solid rgba(48,54,61,.5); transition: background .1s; }
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr:hover { background: rgba(48,54,61,.45); }
+    tbody td { padding: 9px 12px; }
+    .tr { text-align: right; }
+
+    .empty { text-align: center; padding: 40px; color: var(--muted); font-size: 13px; }
+
+    /* ── Badges ────────────────────────────────────────────────────── */
+    .badge { display: inline-block; padding: 2px 7px; border-radius: 20px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .3px; }
+    .b-buy  { background: rgba(63,185,80,.15);  color: var(--green); }
+    .b-sell { background: rgba(248,81,73,.15);  color: var(--red); }
+    .b-sub  { background: rgba(88,166,255,.15); color: var(--blue); }
+    .b-fill { background: rgba(63,185,80,.15);  color: var(--green); }
+    .b-can  { background: rgba(139,148,158,.15);color: var(--muted); }
+    .b-pend { background: rgba(227,179,65,.15); color: var(--yellow); }
+
+    /* ── Modal ─────────────────────────────────────────────────────── */
+    .overlay {
+      display: none; position: fixed; inset: 0;
+      background: rgba(0,0,0,.72);
+      z-index: 200; align-items: center; justify-content: center;
+    }
+    .overlay.open { display: flex; }
+    .modal {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: var(--r);
+      padding: 22px 24px;
+      width: 360px; max-width: 92vw;
+    }
+    .modal h3 { font-size: 14px; margin-bottom: 14px; }
+    .modal-foot { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+    .port-hint { font-size: 11px; color: var(--muted); margin-top: 6px; line-height: 1.7; }
+
+    /* ── Toast ─────────────────────────────────────────────────────── */
+    #toasts { position: fixed; bottom: 18px; right: 18px; z-index: 300; display: flex; flex-direction: column; gap: 7px; }
+    .toast {
+      padding: 10px 14px; border-radius: var(--r);
+      font-size: 13px; max-width: 310px;
+      animation: tIn .2s ease;
+      box-shadow: 0 4px 14px rgba(0,0,0,.5);
+    }
+    @keyframes tIn { from { transform: translateX(110%); opacity: 0; } to { transform: none; opacity: 1; } }
+    .t-ok   { background: #112a1a; border: 1px solid rgba(63,185,80,.4);  color: var(--green); }
+    .t-err  { background: #2a1111; border: 1px solid rgba(248,81,73,.4);  color: var(--red);   }
+    .t-info { background: var(--bg3); border: 1px solid var(--border);    color: var(--text);  }
+
+    /* ── Misc ──────────────────────────────────────────────────────── */
+    .mono  { font-family: 'SF Mono', 'Consolas', monospace; }
+    .flex  { display: flex; }
+    .gap6  { gap: 6px; }
+    .ac    { align-items: center; }
+    .c-blue { color: var(--blue); }
+    .c-mut  { color: var(--muted); }
+    .c-grn  { color: var(--green); }
+    .c-red  { color: var(--red); }
+  </style>
+</head>
+<body>
+
+<!-- ═══════════════════════════ NAVIGATION ══════════════════════════════ -->
+<nav>
+  <div class="nav-brand">IB <span>Order Manager</span></div>
+  <div class="nav-spacer"></div>
+  <!-- Auto-close toggle -->
+  <div class="toggle-row" title="15:57 cancel all open orders · 15:58 close all positions at market">
+    <div id="sw-ac" class="sw" onclick="toggleAutoClose()"></div>
+    <span id="sw-ac-lbl" style="color:var(--muted)">收市平倉</span>
+  </div>
+  <!-- Auto-refresh toggle -->
+  <div class="toggle-row">
+    <div id="sw" class="sw" onclick="toggleAuto()" title="Auto-refresh every 3 s"></div>
+    Auto
+  </div>
+  <button class="btn" onclick="refreshAll()" title="Manual refresh">↻ Refresh</button>
+  <div class="status-pill">
+    <div id="dot" class="status-dot"></div>
+    <span id="status-txt">Disconnected</span>
+  </div>
+  <button id="btn-paper" class="btn-blue" onclick="connectPaper()">Paper</button>
+  <button id="btn-live"  class="btn-live"  onclick="connectLive()">Live</button>
+  <button id="btn-dis"  class="btn"      onclick="doDisconnect()" style="display:none">Disconnect</button>
+</nav>
+
+
+<!-- ═══════════════════════════ MODIFY MODAL ════════════════════════════ -->
+<div id="m-modify" class="overlay" onclick="overlayClose(event,'m-modify')">
+  <div class="modal">
+    <h3>Modify Order <span id="mod-label" class="c-mut"></span></h3>
+    <input type="hidden" id="mod-id" />
+    <div class="fg"><label>Limit Price</label><input id="mod-lmt" type="number" step="0.01" placeholder="Leave blank to keep current" /></div>
+    <div class="fg"><label>Quantity</label><input id="mod-qty" type="number" step="1" placeholder="Leave blank to keep current" /></div>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeModal('m-modify')">Cancel</button>
+      <button class="btn-blue" onclick="submitModify()">Update</button>
+    </div>
+  </div>
+</div>
+
+
+<!-- ════════════════════════════ MAIN PAGE ══════════════════════════════ -->
+<div class="page">
+
+  <!-- Account cards -->
+  <div class="cards">
+    <div class="card">
+      <div class="card-label">Net Liquidation</div>
+      <div class="card-val" id="c-netliq">—</div>
+      <div class="card-cur" id="c-netliq-c"></div>
+    </div>
+    <div class="card">
+      <div class="card-label">Total Cash</div>
+      <div class="card-val" id="c-cash">—</div>
+      <div class="card-cur" id="c-cash-c"></div>
+    </div>
+    <div class="card">
+      <div class="card-label">Buying Power</div>
+      <div class="card-val" id="c-bp">—</div>
+      <div class="card-cur" id="c-bp-c"></div>
+    </div>
+    <div class="card">
+      <div class="card-label">Available Funds</div>
+      <div class="card-val" id="c-avail">—</div>
+      <div class="card-cur" id="c-avail-c"></div>
+    </div>
+    <div class="card">
+      <div class="card-label">Unrealized P&amp;L</div>
+      <div class="card-val" id="c-upnl">—</div>
+      <div class="card-cur" id="c-upnl-c"></div>
+    </div>
+    <div class="card">
+      <div class="card-label">Realized P&amp;L</div>
+      <div class="card-val" id="c-rpnl">—</div>
+      <div class="card-cur" id="c-rpnl-c"></div>
+    </div>
+    <div class="card">
+      <div class="card-label">Gross Position</div>
+      <div class="card-val" id="c-gpv">—</div>
+      <div class="card-cur" id="c-gpv-c"></div>
+    </div>
+  </div>
+
+  <!-- Two-column main -->
+  <div class="main">
+
+    <!-- ── Order entry panel ────────────────────────────────── -->
+    <div class="panel">
+      <div class="panel-head">Place Order</div>
+      <div class="panel-body">
+
+        <!-- Quick text entry ─────────────────────────────────── -->
+        <div class="fg">
+          <label>Quick Entry</label>
+          <div style="display:flex;gap:6px">
+            <input id="o-quick"
+                   class="mono"
+                   placeholder="BUY AAPL 150 160 140"
+                   style="font-size:12px;letter-spacing:.02em"
+                   onkeydown="if(event.key==='Enter'){event.preventDefault();quickPlace()}" />
+            <button class="btn-blue" onclick="quickPlace()"
+                    style="white-space:nowrap;padding:5px 11px;font-size:12px">Place ↵</button>
+          </div>
+          <div style="font-size:10px;color:var(--muted);margin-top:4px;line-height:1.7">
+            <span style="color:var(--text)">BUY/SELL&nbsp; SYMBOL&nbsp; ENTRY&nbsp; TP&nbsp; SL</span>
+            &nbsp;or add qty:&nbsp;
+            <span style="color:var(--text)">BUY&nbsp; SYMBOL&nbsp; QTY&nbsp; ENTRY&nbsp; TP&nbsp; SL</span>
+          </div>
+        </div>
+
+        <hr class="sep" />
+
+        <div class="fg">
+          <label>Symbol</label>
+          <input id="o-sym" placeholder="e.g. AAPL" style="text-transform:uppercase" />
+        </div>
+
+        <div class="row2">
+          <div class="fg">
+            <label>Security Type</label>
+            <select id="o-sec" onchange="frmUpdate()">
+              <option value="STK">Stock (STK)</option>
+              <option value="OPT">Option (OPT)</option>
+              <option value="FUT">Future (FUT)</option>
+              <option value="CASH">Forex (CASH)</option>
+              <option value="CFD">CFD</option>
+            </select>
+          </div>
+          <div class="fg">
+            <label>Currency</label>
+            <input id="o-cur" value="USD" />
+          </div>
+        </div>
+
+        <div class="fg">
+          <label>Exchange</label>
+          <input id="o-exch" value="SMART" />
+        </div>
+
+        <!-- Expiry (OPT / FUT) -->
+        <div id="f-expiry" style="display:none">
+          <div class="fg">
+            <label>Expiry (YYYYMMDD)</label>
+            <input id="o-exp" placeholder="e.g. 20251219" />
+          </div>
+        </div>
+
+        <!-- Strike + Right (OPT only) -->
+        <div id="f-opt" style="display:none">
+          <div class="row2">
+            <div class="fg">
+              <label>Strike</label>
+              <input id="o-strike" type="number" step="0.5" placeholder="Strike" />
+            </div>
+            <div class="fg">
+              <label>Right</label>
+              <select id="o-right">
+                <option value="C">Call (C)</option>
+                <option value="P">Put (P)</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <hr class="sep" />
+
+        <div class="row2">
+          <div class="fg">
+            <label>Order Type</label>
+            <select id="o-type" onchange="frmUpdate()">
+              <option value="market">Market</option>
+              <option value="limit">Limit</option>
+              <option value="stop">Stop</option>
+              <option value="stop_limit">Stop Limit</option>
+              <option value="bracket" selected>Bracket</option>
+            </select>
+          </div>
+          <div class="fg">
+            <label>Quantity</label>
+            <input id="o-qty" type="number" step="1" min="0" placeholder="e.g. 100" />
+          </div>
+        </div>
+
+        <!-- Limit price -->
+        <div id="f-lmt" class="fg" style="display:none">
+          <label>Limit Price</label>
+          <input id="o-lmt" type="number" step="0.01" placeholder="Limit price" />
+        </div>
+
+        <!-- Stop price -->
+        <div id="f-stp" class="fg" style="display:none">
+          <label>Stop Price</label>
+          <input id="o-stp" type="number" step="0.01" placeholder="Stop price" />
+        </div>
+
+        <!-- Bracket prices -->
+        <div id="f-brk" style="display:none">
+          <div class="fg">
+            <label>Entry Limit Price</label>
+            <input id="o-entry" type="number" step="0.01" placeholder="Entry price" />
+          </div>
+          <div class="row2">
+            <div class="fg">
+              <label>Take Profit</label>
+              <input id="o-tp" type="number" step="0.01" placeholder="TP price" />
+            </div>
+            <div class="fg">
+              <label>Stop Loss</label>
+              <input id="o-sl" type="number" step="0.01" placeholder="SL price" />
+            </div>
+          </div>
+          <label class="fg" style="display:flex;align-items:center;gap:7px;cursor:pointer;margin-top:6px;font-size:12px;color:var(--muted)">
+            <input type="checkbox" id="o-gtd" checked style="width:auto;accent-color:var(--blue)" />
+            Cancel at 1 pm Eastern next day (GTD)
+          </label>
+        </div>
+
+        <div class="action-btns">
+          <button class="btn-buy"  onclick="placeOrder('BUY')">▲ BUY</button>
+          <button class="btn-sell" onclick="placeOrder('SELL')">▼ SELL</button>
+        </div>
+
+      </div>
+    </div><!-- /order panel -->
+
+    <!-- ── Data panel (tabs) ─────────────────────────────────── -->
+    <div class="panel">
+      <div class="tabs">
+        <button class="tab active" id="tb-pos" onclick="showTab('pos')">
+          Positions&nbsp;<span id="cnt-pos" class="c-mut"></span>
+        </button>
+        <button class="tab" id="tb-ord" onclick="showTab('ord')">
+          Open Orders&nbsp;<span id="cnt-ord" class="c-mut"></span>
+        </button>
+      </div>
+
+      <!-- Positions -->
+      <div id="tp-pos" class="tab-pane active">
+        <div class="tbl-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th>Type</th>
+                <th class="tr">Position</th>
+                <th class="tr">Avg Cost</th>
+                <th class="tr">Mkt Price</th>
+                <th class="tr">Mkt Value</th>
+                <th class="tr">Unrealized P&amp;L</th>
+                <th class="tr">Realized P&amp;L</th>
+                <th class="tr">Currency</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="tb-pos-body">
+              <tr><td colspan="10" class="empty">Connect to IB to view positions</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Open Orders -->
+      <div id="tp-ord" class="tab-pane">
+        <div class="tbl-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Symbol</th>
+                <th>Action</th>
+                <th class="tr">Qty</th>
+                <th>Type</th>
+                <th class="tr">Price</th>
+                <th class="tr">Filled / Total</th>
+                <th>Status</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="tb-ord-body">
+              <tr><td colspan="9" class="empty">Connect to IB to view orders</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div><!-- /data panel -->
+
+  </div><!-- /main grid -->
+</div><!-- /page -->
+
+<div id="toasts"></div>
+
+<!-- ═══════════════════════════════ JS ══════════════════════════════════ -->
+<script>
+'use strict';
+
+/* ── State ───────────────────────────────────────────────────────────── */
+let connected   = false;
+let autoOn      = true;
+let autoCloseOn = false;
+let timer       = null;
+let priceTimer  = null;
+const INTERVAL       = 1000;
+const PRICE_INTERVAL = 1000;
+
+/* ── Cross-tab coordination ──────────────────────────────────────────── */
+// BroadcastChannel lets one tab share fetched data with all others so that
+// only the currently-visible tab actually polls the server.
+const _bc = typeof BroadcastChannel !== 'undefined'
+  ? new BroadcastChannel('ib_dashboard')
+  : null;
+
+if (_bc) {
+  _bc.onmessage = (e) => {
+    const { type, acc, pos, ord } = e.data;
+    if (type === 'refresh') {
+      if (acc) renderAccount(acc);
+      if (pos) renderPositions(pos);
+      if (ord) renderOrders(ord);
+    }
+  };
+}
+
+/* ── API ─────────────────────────────────────────────────────────────── */
+async function api(method, path, body) {
+  const r = await fetch(path, {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+  return d;
+}
+
+/* ── Modals ──────────────────────────────────────────────────────────── */
+function openModal(id)  { document.getElementById(id).classList.add('open'); }
+function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+function overlayClose(e, id) { if (e.target.classList.contains('overlay')) closeModal(id); }
+
+/* ── Connection ──────────────────────────────────────────────────────── */
+async function connectPaper() { await doConnect('127.0.0.1', 7497, 1, 'Paper'); }
+async function connectLive()  { await doConnect('127.0.0.1', 7496, 1, 'Live');  }
+
+async function doConnect(host, port, cid, label) {
+  try {
+    toast(`Connecting to ${label}…`, 'info');
+    const d = await api('POST', '/api/connect', { host, port, client_id: cid });
+    connected = true;
+    setConnUI(true, label);
+    toast(`Connected to ${label} (${d.host}:${d.port})`, 'ok');
+    await refreshAll();
+    await refreshPositions();
+    if (autoOn) startPoll();
+  } catch(e) {
+    toast(`Connection failed: ${e.message}`, 'err');
+  }
+}
+
+async function doDisconnect() {
+  try {
+    await api('POST', '/api/disconnect');
+    connected = false;
+    setConnUI(false);
+    stopPoll();
+    clearDisplay();
+    toast('Disconnected', 'info');
+  } catch(e) { toast(e.message, 'err'); }
+}
+
+function setConnUI(on, info = '') {
+  document.getElementById('dot').className = 'status-dot' + (on ? ' on' : '');
+  document.getElementById('status-txt').textContent = on ? `Connected  ${info}` : 'Disconnected';
+  document.getElementById('btn-paper').style.display = on ? 'none' : '';
+  document.getElementById('btn-live').style.display  = on ? 'none' : '';
+  document.getElementById('btn-dis').style.display   = on ? '' : 'none';
+}
+
+/* ── Refresh ─────────────────────────────────────────────────────────── */
+async function refreshPositions() {
+  if (!connected || document.hidden) return;
+  try {
+    const pos = await api('GET', '/api/positions');
+    renderPositions(pos);
+    if (_bc) _bc.postMessage({ type: 'refresh', pos });
+  } catch(e) {
+    if (e.message.includes('Not connected')) {
+      connected = false; setConnUI(false); stopPoll();
+    }
+  }
+}
+
+async function refreshAll() {
+  if (!connected) return;
+  // Don't hit the server when this tab is hidden — another tab may be polling
+  // and will broadcast the result via BroadcastChannel.
+  if (document.hidden) return;
+  try {
+    const [acc, ord] = await Promise.all([
+      api('GET', '/api/account'),
+      api('GET', '/api/orders'),
+    ]);
+    renderAccount(acc);
+    renderOrders(ord);
+    // Share with all other open tabs so they stay live without polling
+    if (_bc) _bc.postMessage({ type: 'refresh', acc, ord });
+  } catch(e) {
+    if (e.message.includes('Not connected')) {
+      connected = false; setConnUI(false); stopPoll();
+    }
+  }
+}
+
+function startPoll() {
+  if (!timer)      timer      = setInterval(refreshAll,       INTERVAL);
+  if (!priceTimer) priceTimer = setInterval(refreshPositions, PRICE_INTERVAL);
+}
+function stopPoll() {
+  clearInterval(timer);      timer      = null;
+  clearInterval(priceTimer); priceTimer = null;
+}
+
+function toggleAuto() {
+  autoOn = !autoOn;
+  document.getElementById('sw').classList.toggle('on', autoOn);
+  autoOn && connected ? startPoll() : stopPoll();
+}
+
+// Pause polling while the tab is hidden; resume when it comes back into view.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    stopPoll();
+  } else if (connected && autoOn) {
+    refreshAll();        // immediate catch-up refresh
+    refreshPositions();
+    startPoll();
+  }
+});
+
+/* ── Auto-close toggle ───────────────────────────────────────────────── */
+async function toggleAutoClose() {
+  autoCloseOn = !autoCloseOn;
+  try {
+    await api('POST', '/api/autoclose', { enabled: autoCloseOn });
+    setAutoCloseUI(autoCloseOn);
+    toast(autoCloseOn
+      ? '收市平倉已啟動 — 15:55 ET 自動市價平倉'
+      : '收市平倉已停用', autoCloseOn ? 'err' : 'info');
+  } catch(e) {
+    autoCloseOn = !autoCloseOn; // revert on error
+    toast(`Auto-close error: ${e.message}`, 'err');
+  }
+}
+
+function setAutoCloseUI(on) {
+  const sw  = document.getElementById('sw-ac');
+  const lbl = document.getElementById('sw-ac-lbl');
+  sw.className = 'sw' + (on ? ' ac-on' : '');
+  lbl.style.color = on ? 'var(--red)' : 'var(--muted)';
+  lbl.textContent = on ? '收市平倉 ✓' : '收市平倉';
+}
+
+/* ── Account cards ───────────────────────────────────────────────────── */
+function fmt(v) {
+  const n = parseFloat(v);
+  return isNaN(n) ? v : n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function setCard(id, data, color) {
+  const el = document.getElementById(id);
+  const ec = document.getElementById(id + '-c');
+  if (!data) { el.textContent = '—'; if (ec) ec.textContent = ''; return; }
+  el.textContent = fmt(data.value);
+  if (ec) ec.textContent = data.currency || '';
+  if (color) {
+    const n = parseFloat(data.value);
+    el.className = 'card-val' + (n > 0 ? ' pos' : n < 0 ? ' neg' : '');
+  } else {
+    el.className = 'card-val';
+  }
+}
+function renderAccount(d) {
+  setCard('c-netliq', d.NetLiquidation);
+  setCard('c-cash',   d.TotalCashValue);
+  setCard('c-bp',     d.BuyingPower);
+  setCard('c-avail',  d.AvailableFunds);
+  setCard('c-upnl',   d.UnrealizedPnL, true);
+  setCard('c-rpnl',   d.RealizedPnL,   true);
+  setCard('c-gpv',    d.GrossPositionValue);
+}
+
+/* ── Positions table ─────────────────────────────────────────────────── */
+function renderPositions(rows) {
+  const cnt  = document.getElementById('cnt-pos');
+  const body = document.getElementById('tb-pos-body');
+  cnt.textContent = rows.length ? `(${rows.length})` : '';
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="10" class="empty">No open positions</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map(p => {
+    const pClass  = p.position       > 0 ? 'c-grn' : p.position       < 0 ? 'c-red' : '';
+    const upClass = p.unrealized_pnl > 0 ? 'c-grn' : p.unrealized_pnl < 0 ? 'c-red' : '';
+    const rpClass = p.realized_pnl   > 0 ? 'c-grn' : p.realized_pnl   < 0 ? 'c-red' : '';
+    const closeAction = p.position > 0 ? 'SELL' : 'BUY';
+    const closeQty    = Math.abs(p.position);
+    const exchArg     = JSON.stringify(p.exchange || 'SMART');
+    const curArg      = JSON.stringify(p.currency || 'USD');
+    return `<tr>
+      <td><strong>${esc(p.symbol)}</strong></td>
+      <td class="c-mut" style="font-size:11px">${esc(p.sec_type)}</td>
+      <td class="tr mono ${pClass}">${fmt(p.position)}</td>
+      <td class="tr mono">${fmt(p.avg_cost)}</td>
+      <td class="tr mono">${fmt(p.market_price)}</td>
+      <td class="tr mono">${fmt(p.market_value)}</td>
+      <td class="tr mono ${upClass}">${fmt(p.unrealized_pnl)}</td>
+      <td class="tr mono ${rpClass}">${fmt(p.realized_pnl)}</td>
+      <td class="c-mut">${esc(p.currency)}</td>
+      <td><button class="btn-xs-cancel" onclick="doClosePosition(${JSON.stringify(p.symbol)},${JSON.stringify(p.sec_type)},${exchArg},${curArg},'${closeAction}',${closeQty})">平倉</button></td>
+    </tr>`;
+  }).join('');
+}
+
+/* ── Close position ──────────────────────────────────────────────────── */
+async function doClosePosition(symbol, secType, exchange, currency, action, qty) {
+  if (!confirm(`平倉 ${action} ${qty} ${symbol} @ Market?`)) return;
+  try {
+    await api('POST', '/api/orders', {
+      symbol, sec_type: secType, exchange: exchange || 'SMART',
+      currency: currency || 'USD', action, quantity: qty, order_type: 'market',
+    });
+    toast(`平倉 ${action} ${qty} ${symbol} sent`, 'ok');
+  } catch(e) { toast(`平倉 failed: ${e.message}`, 'err'); }
+}
+
+/* ── Orders table ────────────────────────────────────────────────────── */
+function statusBadge(s) {
+  switch ((s||'').toLowerCase()) {
+    case 'submitted':    return 'b-sub';
+    case 'filled':       return 'b-fill';
+    case 'cancelled':    return 'b-can';
+    case 'presubmitted': return 'b-pend';
+    default:             return 'b-pend';
+  }
+}
+function renderOrders(rows) {
+  const cnt  = document.getElementById('cnt-ord');
+  const body = document.getElementById('tb-ord-body');
+  cnt.textContent = rows.length ? `(${rows.length})` : '';
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="9" class="empty">No open orders</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map(o => {
+    const ab  = o.action === 'BUY' ? 'b-buy' : 'b-sell';
+    const lmt = (o.lmt_price && o.lmt_price > 0)
+                  ? fmt(o.lmt_price)
+                  : (o.aux_price && o.aux_price > 0) ? fmt(o.aux_price) : '—';
+    return `<tr>
+      <td class="c-mut mono" style="font-size:11px">${o.order_id}</td>
+      <td><strong>${esc(o.symbol)}</strong> <span class="c-mut" style="font-size:11px">${esc(o.sec_type)}</span></td>
+      <td><span class="badge ${ab}">${esc(o.action)}</span></td>
+      <td class="tr mono">${fmt(o.quantity)}</td>
+      <td class="c-mut">${esc(o.order_type)}</td>
+      <td class="tr mono">${lmt}</td>
+      <td class="tr mono">${fmt(o.filled)} / ${fmt(o.quantity)}</td>
+      <td><span class="badge ${statusBadge(o.status)}">${esc(o.status)}</span></td>
+      <td>
+        <div class="flex gap6 ac">
+          <button class="btn-xs-cancel" onclick="doCancel(${o.order_id})">Cancel</button>
+          <button class="btn-xs-edit"   onclick="openModify(${o.order_id},${o.lmt_price||0},${o.quantity})">Edit</button>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+/* ── Place order ─────────────────────────────────────────────────────── */
+function frmUpdate() {
+  const sec = document.getElementById('o-sec').value;
+  const ot  = document.getElementById('o-type').value;
+  document.getElementById('f-expiry').style.display = (sec==='OPT'||sec==='FUT') ? '' : 'none';
+  document.getElementById('f-opt').style.display    = sec==='OPT' ? '' : 'none';
+  document.getElementById('f-lmt').style.display    = (ot==='limit'||ot==='stop_limit') ? '' : 'none';
+  document.getElementById('f-stp').style.display    = (ot==='stop'||ot==='stop_limit')  ? '' : 'none';
+  document.getElementById('f-brk').style.display    = ot==='bracket' ? '' : 'none';
+}
+
+async function placeOrder(action) {
+  const sec = document.getElementById('o-sec').value;
+  const ot  = document.getElementById('o-type').value;
+  const sym = document.getElementById('o-sym').value.trim().toUpperCase();
+  const qty = parseFloat(document.getElementById('o-qty').value);
+
+  if (!sym) { toast('Symbol is required', 'err'); return; }
+  if (!qty || qty <= 0) { toast('Valid quantity is required', 'err'); return; }
+
+  const body = {
+    symbol: sym,
+    sec_type: sec,
+    exchange: document.getElementById('o-exch').value.trim() || 'SMART',
+    currency: document.getElementById('o-cur').value.trim()  || 'USD',
+    action, quantity: qty, order_type: ot,
+  };
+
+  if (ot === 'limit' || ot === 'stop_limit') {
+    const v = parseFloat(document.getElementById('o-lmt').value);
+    if (!v) { toast('Limit price required', 'err'); return; }
+    body.limit_price = v;
+  }
+  if (ot === 'stop' || ot === 'stop_limit') {
+    const v = parseFloat(document.getElementById('o-stp').value);
+    if (!v) { toast('Stop price required', 'err'); return; }
+    body.stop_price = v;
+  }
+  if (ot === 'bracket') {
+    const ep = parseFloat(document.getElementById('o-entry').value);
+    const tp = parseFloat(document.getElementById('o-tp').value);
+    const sl = parseFloat(document.getElementById('o-sl').value);
+    if (!ep || !tp || !sl) { toast('Entry, take-profit, and stop-loss required', 'err'); return; }
+    body.entry_price = ep; body.take_profit = tp; body.stop_loss = sl;
+    body.cancel_next_day_1pm = document.getElementById('o-gtd').checked;
+  }
+  if (sec === 'OPT' || sec === 'FUT') {
+    body.expiry = document.getElementById('o-exp').value.trim();
+  }
+  if (sec === 'OPT') {
+    body.strike = parseFloat(document.getElementById('o-strike').value);
+    body.right  = document.getElementById('o-right').value;
+  }
+
+  try {
+    const r   = await api('POST', '/api/orders', body);
+    const ids = Array.isArray(r) ? r.map(x => x.order_id).join(', ') : r.order_id;
+    toast(`${action} order placed — ID: ${ids}`, 'ok');
+    await refreshAll();
+    showTab('ord');
+  } catch(e) { toast(`Order failed: ${e.message}`, 'err'); }
+}
+
+/* ── Quick text order ────────────────────────────────────────────────── */
+// Parse a flat token array into order groups — each group starts at BUY/SELL.
+// Supports one or more orders in a single input, e.g.:
+//   BUY COHR 53 359.16 372.19 347.16 SELL COHR 50 383.17 372.19 395.98
+function _splitOrderGroups(tokens) {
+  const groups = [];
+  let current = [];
+  for (const tok of tokens) {
+    if ((tok === 'BUY' || tok === 'SELL') && current.length > 0) {
+      groups.push(current);
+      current = [tok];
+    } else {
+      current.push(tok);
+    }
+  }
+  if (current.length > 0) groups.push(current);
+  return groups;
+}
+
+async function quickPlace() {
+  const raw = document.getElementById('o-quick').value.trim();
+  if (!raw) return;
+
+  const tokens = raw.toUpperCase().split(/\s+/);
+  const groups = _splitOrderGroups(tokens);
+
+  // Parse each group into a validated order object
+  const orders = [];
+  for (const parts of groups) {
+    let action, symbol, qty, entry, tp, sl;
+
+    if (parts.length === 5) {
+      // BUY/SELL SYMBOL ENTRY TP SL  — qty taken from the qty field (default 1)
+      [action, symbol, entry, tp, sl] = parts;
+      qty = parseFloat(document.getElementById('o-qty').value) || 1;
+    } else if (parts.length === 6) {
+      // BUY/SELL SYMBOL QTY ENTRY TP SL
+      [action, symbol, qty, entry, tp, sl] = parts;
+      qty = parseFloat(qty);
+    } else {
+      toast(`Format: BUY AAPL [qty] entry tp sl  (got ${parts.length} tokens: ${parts.join(' ')})`, 'err');
+      return;
+    }
+
+    entry = parseFloat(entry);
+    tp    = parseFloat(tp);
+    sl    = parseFloat(sl);
+
+    if (!['BUY','SELL'].includes(action))       { toast('Action must be BUY or SELL', 'err'); return; }
+    if (!symbol)                                 { toast('Symbol required', 'err'); return; }
+    if (isNaN(entry) || isNaN(tp) || isNaN(sl)) { toast('Entry, TP and SL must be numbers', 'err'); return; }
+    if (isNaN(qty) || qty <= 0)                 { toast('Quantity must be > 0', 'err'); return; }
+
+    orders.push({
+      action, symbol, qty, entry, tp, sl,
+      body: {
+        symbol,
+        sec_type: document.getElementById('o-sec').value,
+        exchange: document.getElementById('o-exch').value.trim() || 'SMART',
+        currency: document.getElementById('o-cur').value.trim()  || 'USD',
+        action,
+        quantity: qty,
+        order_type: 'bracket',
+        entry_price: entry,
+        take_profit: tp,
+        stop_loss:   sl,
+        cancel_next_day_1pm: document.getElementById('o-gtd').checked,
+      },
+    });
+  }
+
+  if (orders.length === 0) { toast('No valid orders found', 'err'); return; }
+
+  // Mirror the last order into the form so the user can see what was sent
+  const last = orders[orders.length - 1];
+  document.getElementById('o-sym').value   = last.symbol;
+  document.getElementById('o-qty').value   = last.qty;
+  document.getElementById('o-type').value  = 'bracket';
+  document.getElementById('o-entry').value = last.entry;
+  document.getElementById('o-tp').value    = last.tp;
+  document.getElementById('o-sl').value    = last.sl;
+  frmUpdate();
+
+  // Submit all orders sequentially and collect results / errors
+  const results = [];
+  const errors  = [];
+  for (const ord of orders) {
+    try {
+      const r   = await api('POST', '/api/orders', ord.body);
+      const ids = Array.isArray(r) ? r.map(x => x.order_id).join(', ') : r.order_id;
+      results.push(`${ord.action} ${ord.symbol} #${ids}`);
+    } catch(e) {
+      errors.push(`${ord.action} ${ord.symbol}: ${e.message}`);
+    }
+  }
+
+  if (results.length > 0) toast(`Placed ${results.length} order(s): ${results.join(' | ')}`, 'ok');
+  errors.forEach(msg => toast(`Order failed — ${msg}`, 'err'));
+
+  if (errors.length === 0) document.getElementById('o-quick').value = '';
+  await refreshAll();
+  showTab('ord');
+}
+
+/* ── Cancel order ────────────────────────────────────────────────────── */
+async function doCancel(id) {
+  if (!confirm(`Cancel order #${id}?`)) return;
+  try {
+    await api('DELETE', `/api/orders/${id}`);
+    toast(`Order #${id} cancelled`, 'ok');
+    await refreshAll();
+  } catch(e) { toast(`Cancel failed: ${e.message}`, 'err'); }
+}
+
+/* ── Modify order ────────────────────────────────────────────────────── */
+function openModify(id, lmt, qty) {
+  document.getElementById('mod-label').textContent = `#${id}`;
+  document.getElementById('mod-id').value  = id;
+  document.getElementById('mod-lmt').value = lmt > 0 ? lmt : '';
+  document.getElementById('mod-qty').value = qty;
+  openModal('m-modify');
+}
+async function submitModify() {
+  const id  = +document.getElementById('mod-id').value;
+  const lmt = document.getElementById('mod-lmt').value;
+  const qty = document.getElementById('mod-qty').value;
+  const b   = {};
+  if (lmt) b.lmt_price = parseFloat(lmt);
+  if (qty) b.quantity  = parseFloat(qty);
+  try {
+    await api('PUT', `/api/orders/${id}`, b);
+    toast(`Order #${id} updated`, 'ok');
+    closeModal('m-modify');
+    await refreshAll();
+  } catch(e) { toast(`Modify failed: ${e.message}`, 'err'); }
+}
+
+/* ── Tabs ────────────────────────────────────────────────────────────── */
+function showTab(name) {
+  ['pos','ord'].forEach(n => {
+    document.getElementById(`tp-${n}`).classList.toggle('active', n === name);
+    document.getElementById(`tb-${n}`).classList.toggle('active', n === name);
+  });
+}
+
+/* ── Helpers ─────────────────────────────────────────────────────────── */
+function esc(s) {
+  return String(s ?? '')
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function clearDisplay() {
+  document.getElementById('tb-pos-body').innerHTML = '<tr><td colspan="9" class="empty">Connect to IB to view positions</td></tr>';
+  document.getElementById('tb-ord-body').innerHTML = '<tr><td colspan="9" class="empty">Connect to IB to view orders</td></tr>';
+  ['c-netliq','c-cash','c-bp','c-avail','c-upnl','c-rpnl','c-gpv']
+    .forEach(id => { const e = document.getElementById(id); if(e) e.textContent = '—'; });
+}
+function toast(msg, type) {
+  const el = document.createElement('div');
+  el.className = `toast t-${type}`;
+  el.textContent = msg;
+  document.getElementById('toasts').appendChild(el);
+  setTimeout(() => {
+    el.style.transition = 'all .3s ease';
+    el.style.opacity = '0';
+    el.style.transform = 'translateX(110%)';
+    setTimeout(() => el.remove(), 320);
+  }, 3500);
+}
+
+/* ── Init ────────────────────────────────────────────────────────────── */
+document.addEventListener('DOMContentLoaded', () => {
+  frmUpdate();
+  // Auto-refresh is on by default — reflect in UI immediately
+  document.getElementById('sw').classList.toggle('on', autoOn);
+  // Sync connection state; auto-connect to paper if not already connected
+  fetch('/api/status').then(r => r.json()).then(d => {
+    if (d.connected) { connected = true; setConnUI(true, 'Paper'); refreshAll(); if (autoOn) startPoll(); }
+    else { connectPaper(); }
+  }).catch(() => { connectPaper(); });
+  // Sync auto-close state
+  fetch('/api/autoclose').then(r => r.json()).then(d => {
+    autoCloseOn = d.autoclose_enabled;
+    setAutoCloseUI(autoCloseOn);
+  }).catch(() => {});
+});
+</script>
+</body>
+</html>
