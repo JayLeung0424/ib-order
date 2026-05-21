@@ -580,22 +580,41 @@ function closeModal(id) { document.getElementById(id).classList.remove('open'); 
 function overlayClose(e, id) { if (e.target.classList.contains('overlay')) closeModal(id); }
 
 /* ── Connection ──────────────────────────────────────────────────────── */
-async function connectPaper() { await doConnect('127.0.0.1', 4002, 1, 'Paper'); }
-async function connectLive()  { await doConnect('127.0.0.1', 4001, 1, 'Live');  }
+const CONN_CANDIDATES = [
+  { host: '127.0.0.1', port: 4002, label: 'Paper IB Gateway' },
+  { host: '127.0.0.1', port: 7497, label: 'Paper IB TWS' },
+  { host: '127.0.0.1', port: 4001, label: 'Live IB Gateway' },
+  { host: '127.0.0.1', port: 7496, label: 'Live IB TWS' },
+];
 
-async function doConnect(host, port, cid, label) {
-  try {
-    toast(`Connecting to ${label}…`, 'info');
-    const d = await api('POST', '/api/connect', { host, port, client_id: cid });
-    connected = true;
-    setConnUI(true, label);
-    toast(`Connected to ${label} (${d.host}:${d.port})`, 'ok');
-    await refreshAll();
-    await refreshPositions();
-    if (autoOn) startPoll();
-  } catch(e) {
-    toast(`Connection failed: ${e.message}`, 'err');
+async function tryConnectList(candidates) {
+  for (const c of candidates) {
+    toast(`Trying ${c.label}…`, 'info');
+    try {
+      await api('POST', '/api/connect', { host: c.host, port: c.port, client_id: 1 });
+      connected = true;
+      setConnUI(true, c.label);
+      toast(`Connected to ${c.label}`, 'ok');
+      await refreshAll();
+      await refreshPositions();
+      if (autoOn) startPoll();
+      return true;
+    } catch(e) { /* try next */ }
   }
+  return false;
+}
+
+async function connectAuto()  {
+  if (!await tryConnectList(CONN_CANDIDATES))
+    toast('Could not connect to any IB endpoint', 'err');
+}
+async function connectPaper() {
+  if (!await tryConnectList(CONN_CANDIDATES.slice(0, 2)))
+    toast('Could not connect to Paper (Gateway or TWS)', 'err');
+}
+async function connectLive()  {
+  if (!await tryConnectList(CONN_CANDIDATES.slice(2)))
+    toast('Could not connect to Live (Gateway or TWS)', 'err');
 }
 
 async function doDisconnect() {
@@ -1052,11 +1071,11 @@ document.addEventListener('DOMContentLoaded', () => {
   frmUpdate();
   // Auto-refresh is on by default — reflect in UI immediately
   document.getElementById('sw').classList.toggle('on', autoOn);
-  // Sync connection state; auto-connect to paper if not already connected
+  // Sync connection state; auto-connect using fallback sequence if not already connected
   fetch('/api/status').then(r => r.json()).then(d => {
-    if (d.connected) { connected = true; setConnUI(true, 'Paper'); refreshAll(); if (autoOn) startPoll(); }
-    else { connectPaper(); }
-  }).catch(() => { connectPaper(); });
+    if (d.connected) { connected = true; setConnUI(true, 'IB'); refreshAll(); if (autoOn) startPoll(); }
+    else { connectAuto(); }
+  }).catch(() => { connectAuto(); });
   // Sync auto-close state
   fetch('/api/autoclose').then(r => r.json()).then(d => {
     autoCloseOn = d.autoclose_enabled;
