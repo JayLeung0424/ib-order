@@ -451,9 +451,8 @@
               <input id="o-sl" type="number" step="0.01" placeholder="SL price" />
             </div>
           </div>
-          <label class="fg" style="display:flex;align-items:center;gap:7px;cursor:pointer;margin-top:6px;font-size:12px;color:var(--muted)">
-            <input type="checkbox" id="o-gtd" checked style="width:auto;accent-color:var(--blue)" />
-            Cancel at 1 pm Eastern next day (GTD)
+          <label class="fg" style="display:flex;align-items:center;gap:7px;cursor:default;margin-top:6px;font-size:12px;color:var(--muted)">
+            Entry TIF: GTD &mdash; IB 自動於 1 pm ET 取消未成交入場單
           </label>
         </div>
 
@@ -878,7 +877,6 @@ async function placeOrder(action) {
     const sl = parseFloat(document.getElementById('o-sl').value);
     if (!ep || !tp || !sl) { toast('Entry, take-profit, and stop-loss required', 'err'); return; }
     body.entry_price = ep; body.take_profit = tp; body.stop_loss = sl;
-    body.cancel_next_day_1pm = document.getElementById('o-gtd').checked;
   }
   if (sec === 'OPT' || sec === 'FUT') {
     body.expiry = document.getElementById('o-exp').value.trim();
@@ -963,7 +961,6 @@ async function quickPlace() {
         entry_price: entry,
         take_profit: tp,
         stop_loss:   sl,
-        cancel_next_day_1pm: document.getElementById('o-gtd').checked,
       },
     });
   }

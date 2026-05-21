@@ -77,6 +77,7 @@ ib: IB  # assigned in lifespan startup
 #               at 15:58 ET all positions are closed at market price.
 # ---------------------------------------------------------------------------
 autoclose_enabled: bool = True
+_cancel_1pm_fired_date      = None   # tracks 13:00 cancel-orders fire per calendar date
 _cancel_orders_fired_date   = None   # tracks 15:57 cancel-orders fire per calendar date
 _close_positions_fired_date = None   # tracks 15:58 close-positions fire per calendar date
 
@@ -122,8 +123,8 @@ async def _close_all_positions_market() -> list[dict]:
 
 
 async def _autoclose_loop():
-    """Background task: at 15:57 ET cancel all open orders, at 15:58 ET close all positions."""
-    global _cancel_orders_fired_date, _close_positions_fired_date
+    """Background task: at 13:00 ET cancel all open orders, at 15:57 ET cancel again, at 15:58 ET close all positions."""
+    global _cancel_1pm_fired_date, _cancel_orders_fired_date, _close_positions_fired_date
     while True:
         try:
             await asyncio.sleep(10)
@@ -135,6 +136,10 @@ async def _autoclose_loop():
             continue
         now   = datetime.now(tz=_EASTERN)
         today = now.date()
+        # 13:00 — cancel all unexecuted entry orders
+        if now.hour == 13 and now.minute == 0 and _cancel_1pm_fired_date != today:
+            _cancel_1pm_fired_date = today
+            await _cancel_all_open_orders()
         # 15:57 — cancel all unexecuted orders
         if now.hour == 15 and now.minute == 57 and _cancel_orders_fired_date != today:
             _cancel_orders_fired_date = today
@@ -196,7 +201,7 @@ class OrderRequest(BaseModel):
     entry_price: Optional[float] = None
     take_profit: Optional[float] = None
     stop_loss: Optional[float] = None
-    cancel_next_day_1pm: bool = True    # GTD: cancel at 1 pm Eastern next day (bracket default)
+    cancel_next_day_1pm: bool = True    # kept for API compatibility; entry TIF is always DAY
     # Options / Futures only
     expiry: Optional[str] = None        # YYYYMMDD
     strike: Optional[float] = None
@@ -351,8 +356,10 @@ async def get_autoclose():
     return {
         "autoclose_enabled":           autoclose_enabled,
         "server_time_eastern":         now.strftime("%H:%M:%S"),
+        "cancel_1pm_time":             "13:00",
         "cancel_orders_time":          "15:57",
         "close_positions_time":        "15:58",
+        "cancel_1pm_fired_date":       str(_cancel_1pm_fired_date)      if _cancel_1pm_fired_date      else None,
         "cancel_orders_fired_date":    str(_cancel_orders_fired_date)   if _cancel_orders_fired_date   else None,
         "close_positions_fired_date":  str(_close_positions_fired_date) if _close_positions_fired_date else None,
     }
@@ -430,15 +437,12 @@ async def place_order(req: OrderRequest):
                 req.action.upper(), req.quantity,
                 req.entry_price, req.take_profit, req.stop_loss,
             )
-            # bracket[0] = parent (entry), bracket[1] = take-profit, bracket[2] = stop-loss
+            # bracket[0] = parent (entry): GTD cancelled at 1 pm ET if unfilled
+            # bracket[1] = take-profit, bracket[2] = stop-loss: DAY (active only after parent fills)
+            bracket[0].tif          = "GTD"
+            bracket[0].goodTillDate = _next_day_1pm_eastern()
             bracket[1].tif = "DAY"
             bracket[2].tif = "DAY"
-            if req.cancel_next_day_1pm:
-                # Cancel the entry if unfilled by 1 pm Eastern today.
-                bracket[0].tif = "GTD"
-                bracket[0].goodTillDate = _next_day_1pm_eastern()
-            else:
-                bracket[0].tif = "DAY"
             trades = [ib.placeOrder(contract, o) for o in bracket]
             await asyncio.sleep(1)
             return [{"order_id": t.order.orderId, "status": t.orderStatus.status} for t in trades]
