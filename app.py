@@ -61,7 +61,7 @@ def _next_day_1pm_eastern() -> str:
     e.g. "20240116 13:00:00 US/Eastern"
     """
     now = datetime.now(tz=_EASTERN)
-    return f"{now.strftime('%Y%m%d')} 13:00:00 US/Eastern"
+    return f"{now.strftime('%Y%m%d')} 12:30:00 US/Eastern"
 
 # ---------------------------------------------------------------------------
 # Global IB instance
