@@ -10,8 +10,8 @@ Run:
     python app.py
     Then open http://localhost:8000 in your browser.
 
-IB Gateway / TWS must be running with API connections enabled.
-Ports:  Live GW=4001  |  Live TWS=7496  |  Paper GW=4002  |  Paper TWS=7497
+IB Gateway must be running with API connections enabled.
+Ports:  IB Gateway paper=4002  |  IB Gateway live=4001
 """
 
 from __future__ import annotations
@@ -61,7 +61,7 @@ def _next_day_1pm_eastern() -> str:
     e.g. "20240116 13:00:00 US/Eastern"
     """
     now = datetime.now(tz=_EASTERN)
-    return f"{now.strftime('%Y%m%d')} 12:30:00 US/Eastern"
+    return f"{now.strftime('%Y%m%d')} 13:00:00 US/Eastern"
 
 # ---------------------------------------------------------------------------
 # Global IB instance
@@ -70,7 +70,6 @@ def _next_day_1pm_eastern() -> str:
 # get "Future attached to a different loop" errors.
 # ---------------------------------------------------------------------------
 ib: IB  # assigned in lifespan startup
-_finished_cache: dict[int, dict] = {}
 
 # ---------------------------------------------------------------------------
 # Auto-close state
@@ -390,19 +389,18 @@ async def open_orders():
     if not ib.isConnected():
         raise HTTPException(400, "Not connected to IB")
     try:
+        # reqAllOpenOrdersAsync refreshes orders from all connected clients.
         await ib.reqAllOpenOrdersAsync()
 
         PENDING_STATUSES = {"PendingSubmit", "PendingCancel", "PreSubmitted", "Submitted"}
-        FINISHED_STATUSES = {"Filled", "Cancelled", "ApiCancelled", "Inactive"}
-        open_list = []
-        finished_list = []
-
+        result = []
         for t in ib.trades():
             o = t.order
             s = t.orderStatus
-            item = {
+            if s.status not in PENDING_STATUSES:
+                continue
+            result.append({
                 "order_id":   o.orderId,
-                "parent_id":  o.parentId,
                 "symbol":     t.contract.symbol,
                 "sec_type":   t.contract.secType,
                 "action":     o.action,
@@ -414,18 +412,8 @@ async def open_orders():
                 "status":     s.status,
                 "filled":     float(s.filled),
                 "remaining":  float(s.remaining),
-            }
-            if s.status in PENDING_STATUSES:
-                open_list.append(item)
-            elif s.status in FINISHED_STATUSES:
-                finished_list.append(item)
-                _finished_cache[o.orderId] = item
-
-        if len(_finished_cache) > 500:
-            keys = sorted(_finished_cache.keys(), reverse=True)[:200]
-            _finished_cache = {k: _finished_cache[k] for k in keys}
-
-        return {"open": open_list, "finished": list(_finished_cache.values())}
+            })
+        return result
     except Exception as exc:
         raise HTTPException(500, str(exc))
 

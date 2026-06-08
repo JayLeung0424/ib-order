@@ -197,17 +197,6 @@
     .b-can  { background: rgba(139,148,158,.15);color: var(--muted); }
     .b-pend { background: rgba(227,179,65,.15); color: var(--yellow); }
 
-    .b-entry   { background: rgba(88,166,255,.15); color: var(--blue); }
-    .b-tp      { background: rgba(63,185,80,.15);  color: var(--green); }
-    .b-sl      { background: rgba(248,81,73,.15);  color: var(--red); }
-
-    .tr-parent { border-left: 3px solid var(--blue); }
-    .tr-child  { border-left: 3px solid var(--border); }
-    .tr-child td { padding: 5px 12px; font-size: 13px; }
-    .tr-child td:first-child { padding-left: 36px; }
-    .tr-child:hover { background: rgba(48,54,61,.3); }
-    .tree-prefix { color: var(--muted); font-size: 12px; margin-right: 4px; user-select: none; }
-
     /* ── Modal ─────────────────────────────────────────────────────── */
     .overlay {
       display: none; position: fixed; inset: 0;
@@ -271,11 +260,9 @@
     <div id="dot" class="status-dot"></div>
     <span id="status-txt">Disconnected</span>
   </div>
-  <button id="btn-lgw"  class="btn-live"  onclick="connectLiveGW()">Live GW</button>
-  <button id="btn-ltw"  class="btn-live"  onclick="connectLiveTWS()">Live TWS</button>
-  <button id="btn-pgw"  class="btn-blue" onclick="connectPaperGW()">Paper GW</button>
-  <button id="btn-ptw"  class="btn-blue" onclick="connectPaperTWS()">Paper TWS</button>
-  <button id="btn-dis"  class="btn"       onclick="doDisconnect()" style="display:none">Disconnect</button>
+  <button id="btn-paper" class="btn-blue" onclick="connectPaper()">Paper</button>
+  <button id="btn-live"  class="btn-live"  onclick="connectLive()">Live</button>
+  <button id="btn-dis"  class="btn"      onclick="doDisconnect()" style="display:none">Disconnect</button>
 </nav>
 
 
@@ -486,9 +473,6 @@
         <button class="tab" id="tb-ord" onclick="showTab('ord')">
           Open Orders&nbsp;<span id="cnt-ord" class="c-mut"></span>
         </button>
-        <button class="tab" id="tb-fnd" onclick="showTab('fnd')">
-          Finished&nbsp;<span id="cnt-fnd" class="c-mut"></span>
-        </button>
       </div>
 
       <!-- Positions -->
@@ -527,7 +511,6 @@
                 <th>Action</th>
                 <th class="tr">Qty</th>
                 <th>Type</th>
-                <th>Role</th>
                 <th class="tr">Price</th>
                 <th class="tr">Filled / Total</th>
                 <th>Status</th>
@@ -535,30 +518,7 @@
               </tr>
             </thead>
             <tbody id="tb-ord-body">
-              <tr><td colspan="10" class="empty">Connect to IB to view orders</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-      <!-- Finished Orders -->
-      <div id="tp-fnd" class="tab-pane">
-        <div class="tbl-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>ID</th>
-                <th>Symbol</th>
-                <th>Action</th>
-                <th class="tr">Qty</th>
-                <th>Type</th>
-                <th>Role</th>
-                <th class="tr">Price</th>
-                <th class="tr">Filled / Total</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody id="tb-fnd-body">
-              <tr><td colspan="9" class="empty">Connect to IB to view finished orders</td></tr>
+              <tr><td colspan="9" class="empty">Connect to IB to view orders</td></tr>
             </tbody>
           </table>
         </div>
@@ -580,9 +540,8 @@ let autoOn      = true;
 let autoCloseOn = false;
 let timer       = null;
 let priceTimer  = null;
-let _orders     = [];
-const INTERVAL       = 3000;
-const PRICE_INTERVAL = 2000;
+const INTERVAL       = 1000;
+const PRICE_INTERVAL = 1000;
 
 /* ── Cross-tab coordination ──────────────────────────────────────────── */
 // BroadcastChannel lets one tab share fetched data with all others so that
@@ -593,13 +552,11 @@ const _bc = typeof BroadcastChannel !== 'undefined'
 
 if (_bc) {
   _bc.onmessage = (e) => {
-    const { type, acc, pos, ord, fnd } = e.data;
+    const { type, acc, pos, ord } = e.data;
     if (type === 'refresh') {
       if (acc) renderAccount(acc);
-      if (ord) _orders = ord;
-      if (pos) renderPositions(pos, _orders);
+      if (pos) renderPositions(pos);
       if (ord) renderOrders(ord);
-      if (fnd) renderFinishedOrders(fnd);
     }
   };
 }
@@ -623,10 +580,10 @@ function overlayClose(e, id) { if (e.target.classList.contains('overlay')) close
 
 /* ── Connection ──────────────────────────────────────────────────────── */
 const CONN_CANDIDATES = [
-  { host: '127.0.0.1', port: 4001, label: 'Live IB Gateway' },
-  { host: '127.0.0.1', port: 7496, label: 'Live IB TWS' },
   { host: '127.0.0.1', port: 4002, label: 'Paper IB Gateway' },
   { host: '127.0.0.1', port: 7497, label: 'Paper IB TWS' },
+  { host: '127.0.0.1', port: 4001, label: 'Live IB Gateway' },
+  { host: '127.0.0.1', port: 7496, label: 'Live IB TWS' },
 ];
 
 async function tryConnectList(candidates) {
@@ -646,16 +603,18 @@ async function tryConnectList(candidates) {
   return false;
 }
 
-async function connectAuto() {
-  if (!await tryConnectList(CONN_CANDIDATES)) {
-    toast('Could not connect — showing demo data', 'info');
-    loadDemoData();
-  }
+async function connectAuto()  {
+  if (!await tryConnectList(CONN_CANDIDATES))
+    toast('Could not connect to any IB endpoint', 'err');
 }
-async function connectLiveGW()   { if (!await tryConnectList([CONN_CANDIDATES[0]])) { toast('Could not connect to Live Gateway', 'err'); loadDemoData(); } }
-async function connectLiveTWS()  { if (!await tryConnectList([CONN_CANDIDATES[1]])) { toast('Could not connect to Live TWS', 'err'); loadDemoData(); } }
-async function connectPaperGW()  { if (!await tryConnectList([CONN_CANDIDATES[2]])) { toast('Could not connect to Paper Gateway', 'err'); loadDemoData(); } }
-async function connectPaperTWS() { if (!await tryConnectList([CONN_CANDIDATES[3]])) { toast('Could not connect to Paper TWS', 'err'); loadDemoData(); } }
+async function connectPaper() {
+  if (!await tryConnectList(CONN_CANDIDATES.slice(0, 2)))
+    toast('Could not connect to Paper (Gateway or TWS)', 'err');
+}
+async function connectLive()  {
+  if (!await tryConnectList(CONN_CANDIDATES.slice(2)))
+    toast('Could not connect to Live (Gateway or TWS)', 'err');
+}
 
 async function doDisconnect() {
   try {
@@ -663,18 +622,17 @@ async function doDisconnect() {
     connected = false;
     setConnUI(false);
     stopPoll();
-    loadDemoData();
-    toast('Disconnected — showing demo data', 'info');
+    clearDisplay();
+    toast('Disconnected', 'info');
   } catch(e) { toast(e.message, 'err'); }
 }
 
 function setConnUI(on, info = '') {
   document.getElementById('dot').className = 'status-dot' + (on ? ' on' : '');
   document.getElementById('status-txt').textContent = on ? `Connected  ${info}` : 'Disconnected';
-  ['btn-lgw','btn-ltw','btn-pgw','btn-ptw'].forEach(id => {
-    document.getElementById(id).style.display = on ? 'none' : '';
-  });
-  document.getElementById('btn-dis').style.display = on ? '' : 'none';
+  document.getElementById('btn-paper').style.display = on ? 'none' : '';
+  document.getElementById('btn-live').style.display  = on ? 'none' : '';
+  document.getElementById('btn-dis').style.display   = on ? '' : 'none';
 }
 
 /* ── Refresh ─────────────────────────────────────────────────────────── */
@@ -682,31 +640,32 @@ async function refreshPositions() {
   if (!connected || document.hidden) return;
   try {
     const pos = await api('GET', '/api/positions');
-    renderPositions(pos, _orders);
+    renderPositions(pos);
     if (_bc) _bc.postMessage({ type: 'refresh', pos });
   } catch(e) {
     if (e.message.includes('Not connected')) {
-      connected = false; setConnUI(false); stopPoll(); loadDemoData();
+      connected = false; setConnUI(false); stopPoll();
     }
   }
 }
 
 async function refreshAll() {
   if (!connected) return;
+  // Don't hit the server when this tab is hidden — another tab may be polling
+  // and will broadcast the result via BroadcastChannel.
   if (document.hidden) return;
   try {
-    const [acc, data] = await Promise.all([
+    const [acc, ord] = await Promise.all([
       api('GET', '/api/account'),
       api('GET', '/api/orders'),
     ]);
-    _orders = data.open;
     renderAccount(acc);
-    renderOrders(data.open);
-    renderFinishedOrders(data.finished);
-    if (_bc) _bc.postMessage({ type: 'refresh', acc, ord: data.open, fnd: data.finished });
+    renderOrders(ord);
+    // Share with all other open tabs so they stay live without polling
+    if (_bc) _bc.postMessage({ type: 'refresh', acc, ord });
   } catch(e) {
     if (e.message.includes('Not connected')) {
-      connected = false; setConnUI(false); stopPoll(); loadDemoData();
+      connected = false; setConnUI(false); stopPoll();
     }
   }
 }
@@ -788,44 +747,8 @@ function renderAccount(d) {
   setCard('c-gpv',    d.GrossPositionValue);
 }
 
-/* ── Shared order helpers ─────────────────────────────────────────────── */
-function orderRoleInfo(o, childrenByPid) {
-  const pid = o.parent_id || 0;
-  if (pid && pid !== o.order_id) {
-    return o.order_type && o.order_type.toUpperCase().includes('STP')
-      ? { role: 'Stop Loss', badge: 'b-sl', isChild: true }
-      : { role: 'Take Profit', badge: 'b-tp', isChild: true };
-  }
-  if (childrenByPid && childrenByPid[o.order_id] && childrenByPid[o.order_id].length > 0) {
-    return { role: 'Entry', badge: 'b-entry', isChild: false };
-  }
-  return { role: '', badge: '', isChild: false };
-}
-
-function orderPriceDisplay(o) {
-  const pid = o.parent_id || 0;
-  const isChild = pid && pid !== o.order_id;
-  const isSL = isChild && o.order_type && o.order_type.toUpperCase().includes('STP');
-  if (isSL) {
-    const stop = o.aux_price && o.aux_price > 0 ? fmt(o.aux_price) : null;
-    const lmt = o.lmt_price && o.lmt_price > 0 ? fmt(o.lmt_price) : null;
-    if (stop && lmt) return stop + ' / ' + lmt;
-    return stop || lmt || '\u2014';
-  }
-  return (o.lmt_price && o.lmt_price > 0) ? fmt(o.lmt_price)
-    : (o.aux_price && o.aux_price > 0) ? fmt(o.aux_price) : '\u2014';
-}
-
-function sortKidsByRole(kids) {
-  return [...kids].sort((a, b) => {
-    const aIsSL = a.order_type && a.order_type.toUpperCase().includes('STP');
-    const bIsSL = b.order_type && b.order_type.toUpperCase().includes('STP');
-    return aIsSL === bIsSL ? a.order_id - b.order_id : aIsSL ? 1 : -1;
-  });
-}
-
 /* ── Positions table ─────────────────────────────────────────────────── */
-function renderPositions(rows, orders) {
+function renderPositions(rows) {
   const cnt  = document.getElementById('cnt-pos');
   const body = document.getElementById('tb-pos-body');
   cnt.textContent = rows.length ? `(${rows.length})` : '';
@@ -833,37 +756,6 @@ function renderPositions(rows, orders) {
     body.innerHTML = '<tr><td colspan="10" class="empty">No open positions</td></tr>';
     return;
   }
-
-  const ordBySymbol = {};
-  if (orders) {
-    for (const o of orders) {
-      const pid = o.parent_id || 0;
-      if (!pid || pid === o.order_id) continue;
-      const key = o.symbol + '|' + o.action;
-      if (!ordBySymbol[key]) ordBySymbol[key] = [];
-      ordBySymbol[key].push(o);
-    }
-  }
-
-  function childRow(o, prefix) {
-    const { role, badge } = orderRoleInfo(o, null);
-    const ab = o.action === 'BUY' ? 'b-buy' : 'b-sell';
-    const price = orderPriceDisplay(o);
-    return `<tr class="tr-child">
-      <td colspan="10" style="padding:4px 12px 4px 32px">
-        <span class="tree-prefix">${prefix}</span>
-        <span class="badge ${badge}">${role}</span>
-        <span class="badge ${ab}" style="margin-left:4px">${esc(o.action)}</span>
-        <span style="margin-left:6px;font-size:12px" class="c-mut">${esc(o.order_type)}</span>
-        <span style="margin-left:8px" class="mono">${price}</span>
-        <span style="margin-left:6px;font-size:12px;color:var(--muted)">qty ${fmt(o.quantity)}</span>
-        <span class="badge ${statusBadge(o.status)}" style="margin-left:6px">${esc(o.status)}</span>
-        <span style="margin-left:6px;font-size:11px" class="c-mut">#${o.order_id}</span>
-        <button class="btn-xs-cancel" style="margin-left:8px" onclick="doCancel(${o.order_id})">Cancel</button>
-      </td>
-    </tr>`;
-  }
-
   body.innerHTML = rows.map(p => {
     const pClass  = p.position       > 0 ? 'c-grn' : p.position       < 0 ? 'c-red' : '';
     const upClass = p.unrealized_pnl > 0 ? 'c-grn' : p.unrealized_pnl < 0 ? 'c-red' : '';
@@ -872,12 +764,7 @@ function renderPositions(rows, orders) {
     const closeQty    = Math.abs(p.position);
     const exchArg     = JSON.stringify(p.exchange || 'SMART');
     const curArg      = JSON.stringify(p.currency || 'USD');
-
-    const childAction = p.position > 0 ? 'SELL' : 'BUY';
-    const lookupKey = p.symbol + '|' + childAction;
-    const kids = sortKidsByRole(ordBySymbol[lookupKey] || []);
-
-    let html = `<tr class="tr-parent">
+    return `<tr>
       <td><strong>${esc(p.symbol)}</strong></td>
       <td class="c-mut" style="font-size:11px">${esc(p.sec_type)}</td>
       <td class="tr mono ${pClass}">${fmt(p.position)}</td>
@@ -889,14 +776,6 @@ function renderPositions(rows, orders) {
       <td class="c-mut">${esc(p.currency)}</td>
       <td><button class="btn-xs-cancel" onclick="doClosePosition(${JSON.stringify(p.symbol)},${JSON.stringify(p.sec_type)},${exchArg},${curArg},'${closeAction}',${closeQty})">平倉</button></td>
     </tr>`;
-
-    if (kids.length) {
-      const last = kids.length - 1;
-      for (let i = 0; i < kids.length; i++) {
-        html += childRow(kids[i], i === last ? '\u2514' : '\u251c');
-      }
-    }
-    return html;
   }).join('');
 }
 
@@ -925,40 +804,23 @@ function statusBadge(s) {
 function renderOrders(rows) {
   const cnt  = document.getElementById('cnt-ord');
   const body = document.getElementById('tb-ord-body');
-
-  const childrenByPid = {};
-  const parents = [];
-  const parentIdSet = new Set();
-  for (const o of rows) {
-    const pid = o.parent_id || 0;
-    if (pid && pid !== o.order_id) {
-      if (!childrenByPid[pid]) childrenByPid[pid] = [];
-      childrenByPid[pid].push(o);
-    } else {
-      parents.push(o);
-      parentIdSet.add(o.order_id);
-    }
-  }
-  const orphanPids = Object.keys(childrenByPid).map(Number).filter(pid => !parentIdSet.has(pid));
-
   cnt.textContent = rows.length ? `(${rows.length})` : '';
   if (!rows.length) {
-    body.innerHTML = '<tr><td colspan="10" class="empty">No open orders</td></tr>';
+    body.innerHTML = '<tr><td colspan="9" class="empty">No open orders</td></tr>';
     return;
   }
-
-  function rowHtml(o, cls, prefix) {
-    const { role, badge } = orderRoleInfo(o, childrenByPid);
-    const ab = o.action === 'BUY' ? 'b-buy' : 'b-sell';
-    const price = orderPriceDisplay(o);
-    return `<tr class="${cls}">
+  body.innerHTML = rows.map(o => {
+    const ab  = o.action === 'BUY' ? 'b-buy' : 'b-sell';
+    const lmt = (o.lmt_price && o.lmt_price > 0)
+                  ? fmt(o.lmt_price)
+                  : (o.aux_price && o.aux_price > 0) ? fmt(o.aux_price) : '—';
+    return `<tr>
       <td class="c-mut mono" style="font-size:11px">${o.order_id}</td>
-      <td>${prefix ? `<span class="tree-prefix">${prefix}</span>` : ''}<strong>${esc(o.symbol)}</strong> <span class="c-mut" style="font-size:11px">${esc(o.sec_type)}</span></td>
+      <td><strong>${esc(o.symbol)}</strong> <span class="c-mut" style="font-size:11px">${esc(o.sec_type)}</span></td>
       <td><span class="badge ${ab}">${esc(o.action)}</span></td>
       <td class="tr mono">${fmt(o.quantity)}</td>
       <td class="c-mut">${esc(o.order_type)}</td>
-      <td>${badge ? `<span class="badge ${badge}">${role}</span>` : ''}</td>
-      <td class="tr mono">${price}</td>
+      <td class="tr mono">${lmt}</td>
       <td class="tr mono">${fmt(o.filled)} / ${fmt(o.quantity)}</td>
       <td><span class="badge ${statusBadge(o.status)}">${esc(o.status)}</span></td>
       <td>
@@ -968,138 +830,7 @@ function renderOrders(rows) {
         </div>
       </td>
     </tr>`;
-  }
-
-  const seen = new Set();
-  const htmls = [];
-
-  for (const o of parents) {
-    if (seen.has(o.order_id)) continue;
-    seen.add(o.order_id);
-    const kids = childrenByPid[o.order_id] ? sortKidsByRole(childrenByPid[o.order_id]) : [];
-    const isBracket = kids.length > 0;
-    htmls.push(rowHtml(o, isBracket ? 'tr-parent' : ''));
-    if (isBracket) {
-      for (let i = 0; i < kids.length; i++) {
-        seen.add(kids[i].order_id);
-        htmls.push(rowHtml(kids[i], 'tr-child', i === kids.length - 1 ? '\u2514' : '\u251c'));
-      }
-    }
-  }
-
-  for (const pid of orphanPids) {
-    const kids = sortKidsByRole(childrenByPid[pid] || []);
-    if (!kids.length) continue;
-    const sym = kids[0].symbol;
-    const stype = kids[0].sec_type;
-    htmls.push(`<tr class="tr-parent" style="opacity:0.55">
-      <td class="c-mut mono" style="font-size:11px">${pid}</td>
-      <td><strong>${esc(sym)}</strong> <span class="c-mut" style="font-size:11px">${esc(stype)}</span></td>
-      <td><span class="badge b-entry">Entry</span> <span style="font-size:12px;color:var(--muted)">Filled</span></td>
-      <td colspan="7"></td>
-    </tr>`);
-    for (let i = 0; i < kids.length; i++) {
-      if (seen.has(kids[i].order_id)) continue;
-      seen.add(kids[i].order_id);
-      htmls.push(rowHtml(kids[i], 'tr-child', i === kids.length - 1 ? '\u2514' : '\u251c'));
-    }
-  }
-
-  for (const o of rows) {
-    if (seen.has(o.order_id)) continue;
-    seen.add(o.order_id);
-    htmls.push(rowHtml(o, ''));
-  }
-
-  body.innerHTML = htmls.join('');
-}
-
-/* ── Finished Orders table ─────────────────────────────────────────────── */
-function renderFinishedOrders(rows) {
-  const cnt  = document.getElementById('cnt-fnd');
-  const body = document.getElementById('tb-fnd-body');
-  cnt.textContent = rows.length ? `(${rows.length})` : '';
-  if (!rows.length) {
-    body.innerHTML = '<tr><td colspan="9" class="empty">No finished orders</td></tr>';
-    return;
-  }
-
-  rows = [...rows].sort((a, b) => b.order_id - a.order_id);
-
-  const childrenByPid = {};
-  const parents = [];
-  const parentIdSet = new Set();
-  for (const o of rows) {
-    const pid = o.parent_id || 0;
-    if (pid && pid !== o.order_id) {
-      if (!childrenByPid[pid]) childrenByPid[pid] = [];
-      childrenByPid[pid].push(o);
-    } else {
-      parents.push(o);
-      parentIdSet.add(o.order_id);
-    }
-  }
-
-  function rowHtml(o, cls, prefix) {
-    const { role, badge } = orderRoleInfo(o, childrenByPid);
-    const ab = o.action === 'BUY' ? 'b-buy' : 'b-sell';
-    const price = orderPriceDisplay(o);
-    return `<tr class="${cls}">
-      <td class="c-mut mono" style="font-size:11px">${o.order_id}</td>
-      <td>${prefix ? `<span class="tree-prefix">${prefix}</span>` : ''}<strong>${esc(o.symbol)}</strong> <span class="c-mut" style="font-size:11px">${esc(o.sec_type)}</span></td>
-      <td><span class="badge ${ab}">${esc(o.action)}</span></td>
-      <td class="tr mono">${fmt(o.quantity)}</td>
-      <td class="c-mut">${esc(o.order_type)}</td>
-      <td>${badge ? `<span class="badge ${badge}">${role}</span>` : ''}</td>
-      <td class="tr mono">${price}</td>
-      <td class="tr mono">${fmt(o.filled)} / ${fmt(o.quantity)}</td>
-      <td><span class="badge ${statusBadge(o.status)}">${esc(o.status)}</span></td>
-    </tr>`;
-  }
-
-  const seen = new Set();
-  const htmls = [];
-
-  for (const o of parents) {
-    if (seen.has(o.order_id)) continue;
-    seen.add(o.order_id);
-    const kids = childrenByPid[o.order_id] ? sortKidsByRole(childrenByPid[o.order_id]) : [];
-    const isBracket = kids.length > 0;
-    htmls.push(rowHtml(o, isBracket ? 'tr-parent' : ''));
-    if (isBracket) {
-      for (let i = 0; i < kids.length; i++) {
-        seen.add(kids[i].order_id);
-        htmls.push(rowHtml(kids[i], 'tr-child', i === kids.length - 1 ? '\u2514' : '\u251c'));
-      }
-    }
-  }
-
-  const orphanPids = Object.keys(childrenByPid).map(Number).filter(pid => !parentIdSet.has(pid));
-  for (const pid of orphanPids) {
-    const kids = sortKidsByRole(childrenByPid[pid] || []);
-    if (!kids.length) continue;
-    const sym = kids[0].symbol;
-    const stype = kids[0].sec_type;
-    htmls.push(`<tr class="tr-parent" style="opacity:0.55">
-      <td class="c-mut mono" style="font-size:11px">${pid}</td>
-      <td><strong>${esc(sym)}</strong> <span class="c-mut" style="font-size:11px">${esc(stype)}</span></td>
-      <td><span class="badge b-entry">Entry</span> <span style="font-size:12px;color:var(--muted)">Filled</span></td>
-      <td colspan="6"></td>
-    </tr>`);
-    for (let i = 0; i < kids.length; i++) {
-      if (seen.has(kids[i].order_id)) continue;
-      seen.add(kids[i].order_id);
-      htmls.push(rowHtml(kids[i], 'tr-child', i === kids.length - 1 ? '\u2514' : '\u251c'));
-    }
-  }
-
-  for (const o of rows) {
-    if (seen.has(o.order_id)) continue;
-    seen.add(o.order_id);
-    htmls.push(rowHtml(o, ''));
-  }
-
-  body.innerHTML = htmls.join('');
+  }).join('');
 }
 
 /* ── Place order ─────────────────────────────────────────────────────── */
@@ -1302,7 +1033,7 @@ async function submitModify() {
 
 /* ── Tabs ────────────────────────────────────────────────────────────── */
 function showTab(name) {
-  ['pos','ord','fnd'].forEach(n => {
+  ['pos','ord'].forEach(n => {
     document.getElementById(`tp-${n}`).classList.toggle('active', n === name);
     document.getElementById(`tb-${n}`).classList.toggle('active', n === name);
   });
@@ -1314,7 +1045,10 @@ function esc(s) {
     .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 function clearDisplay() {
-  loadDemoData();
+  document.getElementById('tb-pos-body').innerHTML = '<tr><td colspan="10" class="empty">Connect to IB to view positions</td></tr>';
+  document.getElementById('tb-ord-body').innerHTML = '<tr><td colspan="9" class="empty">Connect to IB to view orders</td></tr>';
+  ['c-netliq','c-cash','c-bp','c-avail','c-upnl','c-rpnl','c-gpv']
+    .forEach(id => { const e = document.getElementById(id); if(e) e.textContent = '—'; });
 }
 function toast(msg, type) {
   const el = document.createElement('div');
@@ -1329,66 +1063,17 @@ function toast(msg, type) {
   }, 3500);
 }
 
-/* ── Demo data (shown when disconnected) ──────────────────────────────── */
-const DEMO_ACCOUNT = {
-  NetLiquidation:   { value: '1250340.50', currency: 'USD' },
-  TotalCashValue:   { value: '458921.30',  currency: 'USD' },
-  BuyingPower:      { value: '917842.60',  currency: 'USD' },
-  AvailableFunds:   { value: '392150.75',  currency: 'USD' },
-  UnrealizedPnL:    { value: '-1234.56',   currency: 'USD' },
-  RealizedPnL:      { value: '5890.20',    currency: 'USD' },
-  GrossPositionValue:{ value: '791419.20', currency: 'USD' },
-};
-
-const DEMO_POSITIONS = [
-  { symbol:'AAPL', sec_type:'STK', exchange:'SMART', currency:'USD', position:100, avg_cost:185.50, market_price:192.34, market_value:19234.00, unrealized_pnl:684.00,  realized_pnl:0.00 },
-  { symbol:'TSLA', sec_type:'STK', exchange:'SMART', currency:'USD', position:-50, avg_cost:278.20, market_price:265.80, market_value:-13290.00, unrealized_pnl:620.00, realized_pnl:120.50 },
-  { symbol:'COHR', sec_type:'STK', exchange:'SMART', currency:'USD', position:200, avg_cost:355.00, market_price:349.10, market_value:69820.00, unrealized_pnl:-1180.00, realized_pnl:0.00 },
-];
-
-const DEMO_ORDERS_OPEN = [
-  { order_id:101, parent_id:0,  symbol:'AAPL', sec_type:'STK', action:'BUY',  quantity:100, order_type:'LMT', tif:'GTD', lmt_price:185.50, aux_price:null,        status:'Submitted',      filled:0, remaining:100 },
-  { order_id:102, parent_id:101,symbol:'AAPL', sec_type:'STK', action:'SELL', quantity:100, order_type:'LMT', tif:'DAY', lmt_price:210.00, aux_price:null,        status:'Submitted',      filled:0, remaining:100 },
-  { order_id:103, parent_id:101,symbol:'AAPL', sec_type:'STK', action:'SELL', quantity:100, order_type:'STP', tif:'DAY', lmt_price:175.00, aux_price:172.00,      status:'Submitted',      filled:0, remaining:100 },
-  { order_id:104, parent_id:0,  symbol:'TSLA', sec_type:'STK', action:'SELL', quantity:50,  order_type:'LMT', tif:'DAY', lmt_price:300.00, aux_price:null,        status:'PreSubmitted',   filled:0, remaining:50 },
-  { order_id:105, parent_id:0,  symbol:'NVDA', sec_type:'STK', action:'BUY',  quantity:30,  order_type:'LMT', tif:'DAY', lmt_price:880.50, aux_price:null,        status:'Submitted',      filled:0, remaining:30 },
-  { order_id:110, parent_id:0,  symbol:'COHR', sec_type:'STK', action:'BUY',  quantity:200, order_type:'LMT', tif:'GTD', lmt_price:355.00, aux_price:null,        status:'Submitted',      filled:0, remaining:200 },
-  { order_id:111, parent_id:110,symbol:'COHR', sec_type:'STK', action:'SELL', quantity:200, order_type:'LMT', tif:'DAY', lmt_price:372.19, aux_price:null,        status:'Submitted',      filled:0, remaining:200 },
-  { order_id:112, parent_id:110,symbol:'COHR', sec_type:'STK', action:'SELL', quantity:200, order_type:'STP', tif:'DAY', lmt_price:347.16, aux_price:347.16,      status:'Submitted',      filled:0, remaining:200 },
-];
-
-const DEMO_ORDERS_FINISHED = [
-  { order_id:80, parent_id:0,  symbol:'MSFT', sec_type:'STK', action:'BUY',  quantity:50,  order_type:'LMT', tif:'DAY', lmt_price:410.00, aux_price:null,   status:'Filled',     filled:50,  remaining:0 },
-  { order_id:81, parent_id:80,symbol:'MSFT', sec_type:'STK', action:'SELL', quantity:50,  order_type:'LMT', tif:'DAY', lmt_price:440.00, aux_price:null,   status:'Submitted',  filled:0,   remaining:50 },
-  { order_id:82, parent_id:80,symbol:'MSFT', sec_type:'STK', action:'SELL', quantity:50,  order_type:'STP', tif:'DAY', lmt_price:400.00, aux_price:395.00, status:'Submitted',  filled:0,   remaining:50 },
-  { order_id:90, parent_id:0,  symbol:'GOOG', sec_type:'STK', action:'BUY',  quantity:20,  order_type:'LMT', tif:'DAY', lmt_price:155.00, aux_price:null,   status:'Filled',     filled:20,  remaining:0 },
-  { order_id:91, parent_id:90,symbol:'GOOG', sec_type:'STK', action:'SELL', quantity:20,  order_type:'LMT', tif:'DAY', lmt_price:170.00, aux_price:null,   status:'Cancelled',  filled:0,   remaining:0 },
-  { order_id:92, parent_id:90,symbol:'GOOG', sec_type:'STK', action:'SELL', quantity:20,  order_type:'STP', tif:'DAY', lmt_price:145.00, aux_price:142.00, status:'Filled',     filled:20,  remaining:0 },
-  { order_id:95, parent_id:0,  symbol:'META', sec_type:'STK', action:'SELL', quantity:10,  order_type:'MKT', tif:'DAY', lmt_price:null,    aux_price:null,   status:'Filled',     filled:10,  remaining:0 },
-];
-
-function loadDemoData() {
-  _orders = DEMO_ORDERS_OPEN;
-  renderAccount(DEMO_ACCOUNT);
-  renderPositions(DEMO_POSITIONS, DEMO_ORDERS_OPEN);
-  renderOrders(DEMO_ORDERS_OPEN);
-  renderFinishedOrders(DEMO_ORDERS_FINISHED);
-}
-
 /* ── Init ────────────────────────────────────────────────────────────── */
 document.addEventListener('DOMContentLoaded', () => {
   frmUpdate();
+  // Auto-refresh is on by default — reflect in UI immediately
   document.getElementById('sw').classList.toggle('on', autoOn);
-  loadDemoData();
+  // Sync connection state; auto-connect using fallback sequence if not already connected
   fetch('/api/status').then(r => r.json()).then(d => {
-    if (d.connected) {
-      connected = true; setConnUI(true, 'IB'); refreshAll(); refreshPositions(); if (autoOn) startPoll();
-    } else {
-      connectAuto();
-    }
-  }).catch(() => {
-    connectAuto();
-  });
+    if (d.connected) { connected = true; setConnUI(true, 'IB'); refreshAll(); if (autoOn) startPoll(); }
+    else { connectAuto(); }
+  }).catch(() => { connectAuto(); });
+  // Sync auto-close state
   fetch('/api/autoclose').then(r => r.json()).then(d => {
     autoCloseOn = d.autoclose_enabled;
     setAutoCloseUI(autoCloseOn);
