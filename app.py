@@ -401,6 +401,7 @@ async def open_orders():
                 continue
             result.append({
                 "order_id":   o.orderId,
+                "parent_id":  o.parentId,
                 "symbol":     t.contract.symbol,
                 "sec_type":   t.contract.secType,
                 "action":     o.action,

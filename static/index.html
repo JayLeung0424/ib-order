@@ -186,6 +186,27 @@
     tbody td { padding: 9px 12px; }
     .tr { text-align: right; }
 
+    /* Bracket group styling */
+    .bracket-group { border-left: 3px solid var(--blue); }
+    .bracket-child { background: rgba(88,166,255,.04); }
+    .bracket-child td:first-child { padding-left: 8px; }
+    .bracket-sep { border-bottom: none !important; }
+    .bracket-last td { border-bottom: 1px dashed rgba(88,166,255,.3) !important; }
+    .bracket-group:hover, .bracket-child:hover { background: rgba(88,166,255,.08) !important; }
+    .leg-tag {
+      display: inline-block;
+      padding: 1px 5px;
+      border-radius: 3px;
+      font-size: 9px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .3px;
+      margin-right: 4px;
+    }
+    .leg-entry { background: rgba(88,166,255,.2); color: var(--blue); }
+    .leg-tp    { background: rgba(63,185,80,.2);  color: var(--green); }
+    .leg-sl    { background: rgba(248,81,73,.2);   color: var(--red); }
+
     .empty { text-align: center; padding: 40px; color: var(--muted); font-size: 13px; }
 
     /* ── Badges ────────────────────────────────────────────────────── */
@@ -485,6 +506,8 @@
                 <th>Type</th>
                 <th class="tr">Position</th>
                 <th class="tr">Avg Cost</th>
+                <th class="tr">TP</th>
+                <th class="tr">SL</th>
                 <th class="tr">Mkt Price</th>
                 <th class="tr">Mkt Value</th>
                 <th class="tr">Unrealized P&amp;L</th>
@@ -494,7 +517,7 @@
               </tr>
             </thead>
             <tbody id="tb-pos-body">
-              <tr><td colspan="10" class="empty">Connect to IB to view positions</td></tr>
+<tr><td colspan="12" class="empty">Connect to IB to view positions</td></tr>
             </tbody>
           </table>
         </div>
@@ -540,6 +563,8 @@ let autoOn      = true;
 let autoCloseOn = false;
 let timer       = null;
 let priceTimer  = null;
+let _lastOrders = [];
+let _lastPositions = [];
 const INTERVAL       = 1000;
 const PRICE_INTERVAL = 1000;
 
@@ -556,7 +581,7 @@ if (_bc) {
     if (type === 'refresh') {
       if (acc) renderAccount(acc);
       if (pos) renderPositions(pos);
-      if (ord) renderOrders(ord);
+      if (ord) { _lastOrders = ord; renderOrders(ord); }
     }
   };
 }
@@ -661,6 +686,8 @@ async function refreshAll() {
     ]);
     renderAccount(acc);
     renderOrders(ord);
+    // Re-render positions with TP/SL data from orders
+    renderPositions(_lastPositions);
     // Share with all other open tabs so they stay live without polling
     if (_bc) _bc.postMessage({ type: 'refresh', acc, ord });
   } catch(e) {
@@ -748,12 +775,30 @@ function renderAccount(d) {
 }
 
 /* ── Positions table ─────────────────────────────────────────────────── */
+function _findTPSL(symbol, secType, position) {
+  // For a given position, find matching TP and SL from open bracket child orders.
+  // Long position (pos > 0): TP = SELL LMT child, SL = SELL STP child
+  // Short position (pos < 0): TP = BUY LMT child, SL = BUY STP child
+  const action = position > 0 ? 'SELL' : 'BUY';
+  let tp = null, sl = null;
+  for (const o of _lastOrders) {
+    if (o.symbol !== symbol || o.sec_type !== secType) continue;
+    if (o.parent_id <= 0) continue;
+    // Match direction: TP/SL for a long are SELL; for a short are BUY
+    if (o.action !== action) continue;
+    if ((o.order_type === 'LMT') && !tp) tp = o;
+    if ((o.order_type === 'STP' || o.order_type === 'STP LMT') && !sl) sl = o;
+  }
+  return { tp, sl };
+}
+
 function renderPositions(rows) {
+  _lastPositions = rows;
   const cnt  = document.getElementById('cnt-pos');
   const body = document.getElementById('tb-pos-body');
   cnt.textContent = rows.length ? `(${rows.length})` : '';
   if (!rows.length) {
-    body.innerHTML = '<tr><td colspan="10" class="empty">No open positions</td></tr>';
+    body.innerHTML = '<tr><td colspan="12" class="empty">No open positions</td></tr>';
     return;
   }
   body.innerHTML = rows.map(p => {
@@ -764,11 +809,20 @@ function renderPositions(rows) {
     const closeQty    = Math.abs(p.position);
     const exchArg     = JSON.stringify(p.exchange || 'SMART');
     const curArg      = JSON.stringify(p.currency || 'USD');
+    const { tp, sl }  = _findTPSL(p.symbol, p.sec_type, p.position);
+    const tpHtml = tp
+      ? `<span class="c-grn">${fmt(tp.lmt_price)}</span>`
+      : '<span class="c-mut">—</span>';
+    const slHtml = sl
+      ? `<span class="c-red">${fmt(sl.aux_price || sl.lmt_price)}</span>`
+      : '<span class="c-mut">—</span>';
     return `<tr>
       <td><strong>${esc(p.symbol)}</strong></td>
       <td class="c-mut" style="font-size:11px">${esc(p.sec_type)}</td>
       <td class="tr mono ${pClass}">${fmt(p.position)}</td>
       <td class="tr mono">${fmt(p.avg_cost)}</td>
+      <td class="tr mono">${tpHtml}</td>
+      <td class="tr mono">${slHtml}</td>
       <td class="tr mono">${fmt(p.market_price)}</td>
       <td class="tr mono">${fmt(p.market_value)}</td>
       <td class="tr mono ${upClass}">${fmt(p.unrealized_pnl)}</td>
@@ -802,35 +856,97 @@ function statusBadge(s) {
   }
 }
 function renderOrders(rows) {
+  _lastOrders = rows;
   const cnt  = document.getElementById('cnt-ord');
   const body = document.getElementById('tb-ord-body');
-  cnt.textContent = rows.length ? `(${rows.length})` : '';
+
+  // Group orders by bracket: entries with parent_id === 0 that have children
+  // become group headers; children are grouped under their parent.
+  const childrenMap = {};
+  const parentIds = new Set();
+  for (const o of rows) {
+    if (o.parent_id && o.parent_id > 0) {
+      if (!childrenMap[o.parent_id]) childrenMap[o.parent_id] = [];
+      childrenMap[o.parent_id].push(o);
+      parentIds.add(o.parent_id);
+    }
+  }
+
+  const standaloneOrders = rows.filter(o => !parentIds.has(o.order_id));
+  const bracketParents = rows.filter(o => parentIds.has(o.order_id));
+
+  // Count: standalone + bracket groups
+  const groupCount = standaloneOrders.length - rows.filter(o => o.parent_id > 0).length + bracketParents.length;
+  cnt.textContent = groupCount > 0 ? `(${groupCount})` : '';
+
   if (!rows.length) {
     body.innerHTML = '<tr><td colspan="9" class="empty">No open orders</td></tr>';
     return;
   }
-  body.innerHTML = rows.map(o => {
-    const ab  = o.action === 'BUY' ? 'b-buy' : 'b-sell';
-    const lmt = (o.lmt_price && o.lmt_price > 0)
-                  ? fmt(o.lmt_price)
-                  : (o.aux_price && o.aux_price > 0) ? fmt(o.aux_price) : '—';
-    return `<tr>
-      <td class="c-mut mono" style="font-size:11px">${o.order_id}</td>
-      <td><strong>${esc(o.symbol)}</strong> <span class="c-mut" style="font-size:11px">${esc(o.sec_type)}</span></td>
-      <td><span class="badge ${ab}">${esc(o.action)}</span></td>
-      <td class="tr mono">${fmt(o.quantity)}</td>
-      <td class="c-mut">${esc(o.order_type)}</td>
-      <td class="tr mono">${lmt}</td>
-      <td class="tr mono">${fmt(o.filled)} / ${fmt(o.quantity)}</td>
-      <td><span class="badge ${statusBadge(o.status)}">${esc(o.status)}</span></td>
-      <td>
-        <div class="flex gap6 ac">
-          <button class="btn-xs-cancel" onclick="doCancel(${o.order_id})">Cancel</button>
-          <button class="btn-xs-edit"   onclick="openModify(${o.order_id},${o.lmt_price||0},${o.quantity})">Edit</button>
-        </div>
-      </td>
-    </tr>`;
-  }).join('');
+
+  let html = '';
+
+  // Render grouped (bracket) orders first
+  for (const parent of bracketParents) {
+    const kids = childrenMap[parent.order_id] || [];
+    html += renderOrderRow(parent, 'bracket-group', 'leg-entry', 'Entry');
+    for (let i = 0; i < kids.length; i++) {
+      const kid = kids[i];
+      // Determine leg type by order characteristics
+      let legTag = '', legClass = '';
+      if (kid.order_type === 'LMT' || kid.order_type === 'LMT MKT') {
+        // TP is typically a limit order as child
+        // If the parent is a BUY, TP is SELL LMT above entry; SL is SELL STP below entry
+        // If the parent is a SELL, TP is BUY LMT below entry; SL is BUY STP above entry
+        // Use action to distinguish: child actions same as parent => it's the SL (stop)
+        // Actually, for ib_insync bracketOrder:
+        //   BUY bracket: parent=BUY LMT, TP=SELL LMT, SL=SELL STP
+        //   SELL bracket: parent=SELL LMT, TP=BUY LMT, SL=BUY STP
+        // TP and SL both have opposite action from parent.
+        // Distinguish by order type: LMT = TP, STP = SL
+        legTag = 'TP'; legClass = 'leg-tp';
+      } else {
+        legTag = 'SL'; legClass = 'leg-sl';
+      }
+      const isLast = (i === kids.length - 1);
+      html += renderOrderRow(kid, 'bracket-child' + (isLast ? ' bracket-last' : ''), legClass, legTag);
+    }
+  }
+
+  // Render standalone (non-child) orders
+  for (const o of rows) {
+    if (o.parent_id > 0 || parentIds.has(o.order_id)) continue;
+    html += renderOrderRow(o, '', '', '');
+  }
+
+  body.innerHTML = html;
+}
+
+function renderOrderRow(o, rowClass, legClass, legTag) {
+  const ab  = o.action === 'BUY' ? 'b-buy' : 'b-sell';
+  const lmt = (o.lmt_price && o.lmt_price > 0)
+                ? fmt(o.lmt_price)
+                : (o.aux_price && o.aux_price > 0) ? fmt(o.aux_price) : '—';
+  const tagHtml = legTag ? `<span class="leg-tag ${legClass}">${legTag}</span>` : '';
+  let displayType = esc(o.order_type);
+  if (o.tif && o.tif !== 'DAY') displayType += ` <span class="c-mut" style="font-size:10px">${esc(o.tif)}</span>`;
+
+  return `<tr class="${rowClass}">
+    <td class="c-mut mono" style="font-size:11px">${o.order_id}</td>
+    <td>${tagHtml}<strong>${esc(o.symbol)}</strong> <span class="c-mut" style="font-size:11px">${esc(o.sec_type)}</span></td>
+    <td><span class="badge ${ab}">${esc(o.action)}</span></td>
+    <td class="tr mono">${fmt(o.quantity)}</td>
+    <td class="c-mut">${displayType}</td>
+    <td class="tr mono">${lmt}</td>
+    <td class="tr mono">${fmt(o.filled)} / ${fmt(o.quantity)}</td>
+    <td><span class="badge ${statusBadge(o.status)}">${esc(o.status)}</span></td>
+    <td>
+      <div class="flex gap6 ac">
+        <button class="btn-xs-cancel" onclick="doCancel(${o.order_id})">Cancel</button>
+        <button class="btn-xs-edit"   onclick="openModify(${o.order_id},${o.lmt_price||0},${o.quantity})">Edit</button>
+      </div>
+    </td>
+  </tr>`;
 }
 
 /* ── Place order ─────────────────────────────────────────────────────── */
@@ -1000,8 +1116,27 @@ async function quickPlace() {
 
 /* ── Cancel order ────────────────────────────────────────────────────── */
 async function doCancel(id) {
-  if (!confirm(`Cancel order #${id}?`)) return;
+  // Find bracket group for this order
+  const ordRes = await api('GET', '/api/orders').catch(() => []);
+  const target = ordRes.find(o => o.order_id === id);
+  const children = ordRes.filter(o => o.parent_id === id);
+  const parent = target && target.parent_id > 0 ? ordRes.find(o => o.order_id === target.parent_id) : null;
+
+  let msg = `Cancel order #${id}?`;
+  if (children.length > 0) {
+    msg = `Cancel bracket order #${id} (Entry + ${children.length} child orders)?`;
+  } else if (parent) {
+    msg = `Cancel this child order #${id}? (Parent #${parent.order_id} will remain)`;
+  }
+
+  if (!confirm(msg)) return;
   try {
+    // If canceling a parent, also cancel children first (IB should auto-cancel but be safe)
+    if (children.length > 0) {
+      for (const c of children) {
+        try { await api('DELETE', `/api/orders/${c.order_id}`); } catch(e) { /* ignore */ }
+      }
+    }
     await api('DELETE', `/api/orders/${id}`);
     toast(`Order #${id} cancelled`, 'ok');
     await refreshAll();
@@ -1045,7 +1180,9 @@ function esc(s) {
     .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 function clearDisplay() {
-  document.getElementById('tb-pos-body').innerHTML = '<tr><td colspan="10" class="empty">Connect to IB to view positions</td></tr>';
+  _lastOrders = [];
+  _lastPositions = [];
+  document.getElementById('tb-pos-body').innerHTML = '<tr><td colspan="12" class="empty">Connect to IB to view positions</td></tr>';
   document.getElementById('tb-ord-body').innerHTML = '<tr><td colspan="9" class="empty">Connect to IB to view orders</td></tr>';
   ['c-netliq','c-cash','c-bp','c-avail','c-upnl','c-rpnl','c-gpv']
     .forEach(id => { const e = document.getElementById(id); if(e) e.textContent = '—'; });
