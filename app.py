@@ -70,16 +70,16 @@ def _next_day_1pm_eastern() -> str:
 # get "Future attached to a different loop" errors.
 # ---------------------------------------------------------------------------
 ib: IB  # assigned in lifespan startup
+is_paper_account: bool = False   # set after connect; paper accounts use a test schedule
 
 # ---------------------------------------------------------------------------
 # Auto-close state
-# When enabled: at 15:57 ET all open orders are cancelled;
-#               at 15:58 ET all positions are closed at market price.
+# Live:  15:50 ET cancel all open orders; 15:55 ET close all positions at market.
+# Paper: 10:50 ET cancel all open orders; 10:55 ET close all positions at market (test mode).
 # ---------------------------------------------------------------------------
 autoclose_enabled: bool = True
-_cancel_1pm_fired_date      = None   # tracks 13:00 cancel-orders fire per calendar date
-_cancel_orders_fired_date   = None   # tracks 15:57 cancel-orders fire per calendar date
-_close_positions_fired_date = None   # tracks 15:58 close-positions fire per calendar date
+_cancel_orders_fired_date   = None   # tracks cancel-orders fire per calendar date
+_close_positions_fired_date = None   # tracks close-positions fire per calendar date
 
 
 async def _cancel_all_open_orders() -> list[dict]:
@@ -100,13 +100,22 @@ async def _cancel_all_open_orders() -> list[dict]:
     return results
 
 
-async def _close_all_positions_market() -> list[dict]:
-    """Close every open position with a market order. Returns summary list."""
+async def _close_all_positions_market(max_deviation: Optional[float] = None) -> list[dict]:
+    """Close every open position with a market order. Returns summary list.
+
+    If max_deviation is set (e.g. 0.04 for 4%), only positions whose current
+    market price is within that fraction of the average cost are closed; the
+    rest are left untouched.
+    """
     port = ib.portfolio()
     results = []
     for p in port:
         if p.position == 0:
             continue
+        if max_deviation is not None and p.averageCost:
+            dev = abs(p.marketPrice - p.averageCost) / p.averageCost
+            if dev > max_deviation:
+                continue
         action = "SELL" if p.position > 0 else "BUY"
         qty    = abs(p.position)
         order  = MarketOrder(action, qty)
@@ -123,8 +132,12 @@ async def _close_all_positions_market() -> list[dict]:
 
 
 async def _autoclose_loop():
-    """Background task: at 13:00 ET cancel all open orders, at 15:57 ET cancel again, at 15:58 ET close all positions."""
-    global _cancel_1pm_fired_date, _cancel_orders_fired_date, _close_positions_fired_date
+    """Background task: cancel all open orders then close all positions.
+
+    Live accounts:  15:50 ET cancel, 15:55 ET close positions.
+    Paper accounts: 10:50 ET cancel, 10:55 ET close positions (test mode).
+    """
+    global _cancel_orders_fired_date, _close_positions_fired_date
     while True:
         try:
             await asyncio.sleep(10)
@@ -136,18 +149,16 @@ async def _autoclose_loop():
             continue
         now   = datetime.now(tz=_EASTERN)
         today = now.date()
-        # 13:00 — cancel all unexecuted entry orders
-        if now.hour == 13 and now.minute == 0 and _cancel_1pm_fired_date != today:
-            _cancel_1pm_fired_date = today
-            await _cancel_all_open_orders()
-        # 15:57 — cancel all unexecuted orders
-        if now.hour == 15 and now.minute == 57 and _cancel_orders_fired_date != today:
+        cancel_hour,  cancel_minute  = (10, 50) if is_paper_account else (15, 50)
+        close_hour,   close_minute   = (10, 55) if is_paper_account else (15, 55)
+        # cancel all unexecuted orders
+        if now.hour == cancel_hour and now.minute == cancel_minute and _cancel_orders_fired_date != today:
             _cancel_orders_fired_date = today
             await _cancel_all_open_orders()
-        # 15:58 — close all positions at market
-        if now.hour == 15 and now.minute == 58 and _close_positions_fired_date != today:
+        # close all positions at market
+        if now.hour == close_hour and now.minute == close_minute and _close_positions_fired_date != today:
             _close_positions_fired_date = today
-            await _close_all_positions_market()
+            await _close_all_positions_market(max_deviation=0.04)
 
 
 @asynccontextmanager
@@ -243,6 +254,7 @@ def _build_contract(req: OrderRequest):
 
 @app.post("/api/connect")
 async def connect(req: ConnectRequest):
+    global is_paper_account
     try:
         if ib.isConnected():
             ib.disconnect()
@@ -250,7 +262,18 @@ async def connect(req: ConnectRequest):
         # Allow ib_insync's auto-subscriptions (reqAccountUpdates, reqPositions)
         # time to receive their first data batch from IB.
         await asyncio.sleep(2)
-        return {"status": "connected", "host": req.host, "port": req.port, "client_id": req.client_id}
+        # Detect paper account: IB paper account IDs start with "DU".
+        managed = getattr(ib.client, "managedAccounts", "") or ""
+        accts = [a for a in managed.split(",") if a]
+        is_paper_account = any(a.startswith("DU") for a in accts)
+        return {
+            "status": "connected",
+            "host": req.host,
+            "port": req.port,
+            "client_id": req.client_id,
+            "is_paper": is_paper_account,
+            "accounts": accts,
+        }
     except Exception as exc:
         raise HTTPException(500, str(exc))
 
@@ -355,11 +378,10 @@ async def get_autoclose():
     now = datetime.now(tz=_EASTERN)
     return {
         "autoclose_enabled":           autoclose_enabled,
+        "is_paper_account":            is_paper_account,
         "server_time_eastern":         now.strftime("%H:%M:%S"),
-        "cancel_1pm_time":             "13:00",
-        "cancel_orders_time":          "15:57",
-        "close_positions_time":        "15:58",
-        "cancel_1pm_fired_date":       str(_cancel_1pm_fired_date)      if _cancel_1pm_fired_date      else None,
+        "cancel_orders_time":          "10:50" if is_paper_account else "15:50",
+        "close_positions_time":        "10:55" if is_paper_account else "15:55",
         "cancel_orders_fired_date":    str(_cancel_orders_fired_date)   if _cancel_orders_fired_date   else None,
         "close_positions_fired_date":  str(_close_positions_fired_date) if _close_positions_fired_date else None,
     }

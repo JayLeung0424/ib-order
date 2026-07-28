@@ -267,7 +267,7 @@
   <div class="nav-brand">IB <span>Order Manager</span></div>
   <div class="nav-spacer"></div>
   <!-- Auto-close toggle -->
-  <div class="toggle-row" title="15:57 cancel all open orders · 15:58 close all positions at market">
+  <div class="toggle-row" id="sw-ac-row" title="cancel all open orders · close all positions at market">
     <div id="sw-ac" class="sw" onclick="toggleAutoClose()"></div>
     <span id="sw-ac-lbl" style="color:var(--muted)">收市平倉</span>
   </div>
@@ -561,6 +561,8 @@
 let connected   = false;
 let autoOn      = true;
 let autoCloseOn = false;
+let _acCancelTime = '15:50';
+let _acCloseTime  = '15:55';
 let timer       = null;
 let priceTimer  = null;
 let _lastOrders = [];
@@ -730,7 +732,7 @@ async function toggleAutoClose() {
     await api('POST', '/api/autoclose', { enabled: autoCloseOn });
     setAutoCloseUI(autoCloseOn);
     toast(autoCloseOn
-      ? '收市平倉已啟動 — 15:57 取消掛單 · 15:58 市價平倉'
+      ? `收市平倉已啟動 — ${_acCancelTime} 取消掛單 · ${_acCloseTime} 市價平倉`
       : '收市平倉已停用', autoCloseOn ? 'err' : 'info');
   } catch(e) {
     autoCloseOn = !autoCloseOn; // revert on error
@@ -1213,6 +1215,10 @@ document.addEventListener('DOMContentLoaded', () => {
   // Sync auto-close state
   fetch('/api/autoclose').then(r => r.json()).then(d => {
     autoCloseOn = d.autoclose_enabled;
+    if (d.cancel_orders_time)  _acCancelTime = d.cancel_orders_time;
+    if (d.close_positions_time) _acCloseTime  = d.close_positions_time;
+    const tip = `${_acCancelTime} cancel all open orders · ${_acCloseTime} close all positions at market`;
+    document.getElementById('sw-ac-row')?.setAttribute('title', tip);
     setAutoCloseUI(autoCloseOn);
   }).catch(() => {});
 });
