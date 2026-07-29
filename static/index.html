@@ -310,37 +310,30 @@
     <div class="card">
       <div class="card-label">Net Liquidation</div>
       <div class="card-val" id="c-netliq">—</div>
-      <div class="card-cur" id="c-netliq-c"></div>
     </div>
     <div class="card">
       <div class="card-label">Total Cash</div>
       <div class="card-val" id="c-cash">—</div>
-      <div class="card-cur" id="c-cash-c"></div>
     </div>
     <div class="card">
       <div class="card-label">Buying Power</div>
       <div class="card-val" id="c-bp">—</div>
-      <div class="card-cur" id="c-bp-c"></div>
     </div>
     <div class="card">
       <div class="card-label">Available Funds</div>
       <div class="card-val" id="c-avail">—</div>
-      <div class="card-cur" id="c-avail-c"></div>
     </div>
     <div class="card">
-      <div class="card-label">Unrealized P&amp;L</div>
+      <div class="card-label">Unrealized P&amp;L (HKD)</div>
       <div class="card-val" id="c-upnl">—</div>
-      <div class="card-cur" id="c-upnl-c"></div>
     </div>
     <div class="card">
-      <div class="card-label">Realized P&amp;L</div>
+      <div class="card-label">Realized P&amp;L (HKD)</div>
       <div class="card-val" id="c-rpnl">—</div>
-      <div class="card-cur" id="c-rpnl-c"></div>
     </div>
     <div class="card">
       <div class="card-label">Gross Position</div>
       <div class="card-val" id="c-gpv">—</div>
-      <div class="card-cur" id="c-gpv-c"></div>
     </div>
   </div>
 
@@ -509,15 +502,14 @@
                 <th class="tr">TP</th>
                 <th class="tr">SL</th>
                 <th class="tr">Mkt Price</th>
-                <th class="tr">Mkt Value</th>
-                <th class="tr">Unrealized P&amp;L</th>
-                <th class="tr">Realized P&amp;L</th>
-                <th class="tr">Currency</th>
+                <th class="tr">Mkt Value (HKD)</th>
+                <th class="tr">Unrealized P&amp;L (HKD)</th>
+                <th class="tr">Realized P&amp;L (HKD)</th>
                 <th></th>
               </tr>
             </thead>
             <tbody id="tb-pos-body">
-<tr><td colspan="12" class="empty">Connect to IB to view positions</td></tr>
+<tr><td colspan="11" class="empty">Connect to IB to view positions</td></tr>
             </tbody>
           </table>
         </div>
@@ -569,6 +561,7 @@ let _lastOrders = [];
 let _lastPositions = [];
 const INTERVAL       = 1000;
 const PRICE_INTERVAL = 1000;
+const _FX_HKD = 7.8;   // USD→HKD conversion used for P&L display
 
 /* ── Cross-tab coordination ──────────────────────────────────────────── */
 // BroadcastChannel lets one tab share fetched data with all others so that
@@ -753,14 +746,16 @@ function fmt(v) {
   const n = parseFloat(v);
   return isNaN(n) ? v : n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
-function setCard(id, data, color) {
+function signed(n) {
+  const v = Math.round(n);
+  return (v >= 0 ? '+' : '') + v.toLocaleString('en-US');
+}
+function setCard(id, data, color, fx) {
   const el = document.getElementById(id);
-  const ec = document.getElementById(id + '-c');
-  if (!data) { el.textContent = '—'; if (ec) ec.textContent = ''; return; }
-  el.textContent = fmt(data.value);
-  if (ec) ec.textContent = data.currency || '';
+  if (!data) { el.textContent = '—'; el.className = 'card-val'; return; }
+  const n = parseFloat(data.value) * (fx || 1);
+  el.textContent = Math.round(n).toLocaleString('en-US');
   if (color) {
-    const n = parseFloat(data.value);
     el.className = 'card-val' + (n > 0 ? ' pos' : n < 0 ? ' neg' : '');
   } else {
     el.className = 'card-val';
@@ -771,8 +766,8 @@ function renderAccount(d) {
   setCard('c-cash',   d.TotalCashValue);
   setCard('c-bp',     d.BuyingPower);
   setCard('c-avail',  d.AvailableFunds);
-  setCard('c-upnl',   d.UnrealizedPnL, true);
-  setCard('c-rpnl',   d.RealizedPnL,   true);
+  setCard('c-upnl',   d.UnrealizedPnL, true, _FX_HKD);
+  setCard('c-rpnl',   d.RealizedPnL,   true, _FX_HKD);
   setCard('c-gpv',    d.GrossPositionValue);
 }
 
@@ -800,7 +795,7 @@ function renderPositions(rows) {
   const body = document.getElementById('tb-pos-body');
   cnt.textContent = rows.length ? `(${rows.length})` : '';
   if (!rows.length) {
-    body.innerHTML = '<tr><td colspan="12" class="empty">No open positions</td></tr>';
+    body.innerHTML = '<tr><td colspan="11" class="empty">No open positions</td></tr>';
     return;
   }
   body.innerHTML = rows.map(p => {
@@ -812,11 +807,17 @@ function renderPositions(rows) {
     const exchArg     = JSON.stringify(p.exchange || 'SMART');
     const curArg      = JSON.stringify(p.currency || 'USD');
     const { tp, sl }  = _findTPSL(p.symbol, p.sec_type, p.position);
+    const tpPx = tp ? parseFloat(tp.lmt_price) : NaN;
+    const tpPnL = (!isNaN(tpPx) && p.avg_cost)
+      ? (tpPx - p.avg_cost) * p.position * _FX_HKD : NaN;
     const tpHtml = tp
-      ? `<span class="c-grn">${fmt(tp.lmt_price)}</span>`
+      ? `<span class="c-grn">${fmt(tp.lmt_price)}</span> <span class="c-grn">(${signed(tpPnL)})</span>`
       : '<span class="c-mut">—</span>';
+    const slPx = sl ? parseFloat(sl.aux_price || sl.lmt_price) : NaN;
+    const slPnL = (!isNaN(slPx) && p.avg_cost)
+      ? (slPx - p.avg_cost) * p.position * _FX_HKD : NaN;
     const slHtml = sl
-      ? `<span class="c-red">${fmt(sl.aux_price || sl.lmt_price)}</span>`
+      ? `<span class="c-red">${fmt(sl.aux_price || sl.lmt_price)}</span> <span class="c-red">(${signed(slPnL)})</span>`
       : '<span class="c-mut">—</span>';
     return `<tr>
       <td><strong>${esc(p.symbol)}</strong></td>
@@ -826,10 +827,9 @@ function renderPositions(rows) {
       <td class="tr mono">${tpHtml}</td>
       <td class="tr mono">${slHtml}</td>
       <td class="tr mono">${fmt(p.market_price)}</td>
-      <td class="tr mono">${fmt(p.market_value)}</td>
-      <td class="tr mono ${upClass}">${fmt(p.unrealized_pnl)}</td>
-      <td class="tr mono ${rpClass}">${fmt(p.realized_pnl)}</td>
-      <td class="c-mut">${esc(p.currency)}</td>
+      <td class="tr mono">${Math.round(p.market_value * _FX_HKD).toLocaleString('en-US')}</td>
+      <td class="tr mono ${upClass}">${Math.round(p.unrealized_pnl * _FX_HKD).toLocaleString('en-US')}</td>
+      <td class="tr mono ${rpClass}">${Math.round(p.realized_pnl * _FX_HKD).toLocaleString('en-US')}</td>
       <td><button class="btn-xs-cancel" onclick="doClosePosition(${JSON.stringify(p.symbol)},${JSON.stringify(p.sec_type)},${exchArg},${curArg},'${closeAction}',${closeQty})">平倉</button></td>
     </tr>`;
   }).join('');
