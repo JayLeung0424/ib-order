@@ -45,8 +45,9 @@ from ib_insync import (
 
 asyncio.set_event_loop(None)   # hand loop ownership back to uvicorn
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 
@@ -187,6 +188,147 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="IB Order Manager", lifespan=lifespan)
+
+
+# ---------------------------------------------------------------------------
+# Futu integration
+# ---------------------------------------------------------------------------
+# The futu-api SDK is synchronous and opens a TCP socket per call; we run it
+# inside a worker thread so it does not block uvicorn's event loop.
+
+FUTU_QUOTE_HOST = "127.0.0.1"
+FUTU_QUOTE_PORT = 11111
+FUTU_GROUP = "TOP LIST"
+
+
+def _futu_get_stocks(group_name: str = FUTU_GROUP) -> dict:
+    from futu import OpenQuoteContext, UserSecurityGroupType, ModifyUserSecurityOp, RET_OK
+    import datetime as _dt
+
+    quote_ctx = OpenQuoteContext(host=FUTU_QUOTE_HOST, port=FUTU_QUOTE_PORT)
+    try:
+        groups = []
+        ret, group_data = quote_ctx.get_user_security_group(group_type=UserSecurityGroupType.ALL)
+        if ret == RET_OK and hasattr(group_data, "to_dict"):
+            groups = group_data.to_dict(orient="records")
+        elif ret == RET_OK and isinstance(group_data, list):
+            groups = [
+                {"group_name": g.get("group_name", "") if isinstance(g, dict) else str(g),
+                 "group_type": g.get("group_type", "") if isinstance(g, dict) else ""}
+                for g in group_data
+            ]
+
+        ret, data = quote_ctx.get_user_security(group_name)
+        if ret != RET_OK:
+            return {"ok": False, "error": str(data), "groups": groups}
+
+        codes = data["code"].tolist() if hasattr(data, "columns") and "code" in data.columns else []
+        records = []
+        if codes:
+            snap = {}
+            ret_s, snap_data = quote_ctx.get_market_snapshot(codes)
+            if ret_s == RET_OK and hasattr(snap_data, "to_dict"):
+                for r in snap_data.to_dict(orient="records"):
+                    snap[r["code"]] = r
+
+            today = _dt.date.today()
+            end = today.strftime("%Y-%m-%d")
+            start = (today - _dt.timedelta(days=15)).strftime("%Y-%m-%d")
+            for code in codes:
+                s = snap.get(code, {})
+                today_open = s.get("open_price")
+                if today_open is None or float(today_open) == 0:
+                    today_open = s.get("last_price")
+                name = s.get("name", "")
+                anchor = s.get("prev_close_price")
+                prev_open = prev_high = prev_low = None
+                prev_close = anchor
+                prev_volume = None
+                try:
+                    ret_k, kl, _ = quote_ctx.request_history_kline(
+                        code, start=start, end=end, max_count=20
+                    )
+                    if ret_k == RET_OK and len(kl):
+                        rows = kl.to_dict(orient="records")
+                        prev = None
+                        if anchor is not None:
+                            for r in reversed(rows):
+                                cv = r.get("close")
+                                if cv is not None and abs(float(cv) - float(anchor)) < 1e-6:
+                                    prev = r
+                                    break
+                        if prev is None and len(rows) >= 2:
+                            prev = rows[-2]
+                        elif prev is None:
+                            prev = rows[-1]
+                        prev_open = prev.get("open")
+                        prev_high = prev.get("high")
+                        prev_low = prev.get("low")
+                        prev_close = prev.get("close")
+                        prev_volume = prev.get("volume")
+                except Exception:
+                    pass
+                records.append({
+                    "code": code,
+                    "name": name,
+                    "prev_open": prev_open,
+                    "prev_high": prev_high,
+                    "prev_low": prev_low,
+                    "prev_close": prev_close,
+                    "prev_volume": prev_volume,
+                    "today_open": today_open,
+                })
+
+        return {"ok": True, "stocks": records, "groups": groups, "group": group_name}
+    finally:
+        quote_ctx.close()
+
+
+def _futu_add_stocks(group_name: str, code_list: list) -> dict:
+    from futu import OpenQuoteContext, ModifyUserSecurityOp, RET_OK
+    full_list = ["US." + c for c in code_list]
+    quote_ctx = OpenQuoteContext(host=FUTU_QUOTE_HOST, port=FUTU_QUOTE_PORT)
+    try:
+        ret, data = quote_ctx.get_user_security(group_name)
+        if ret == RET_OK:
+            existing = data["code"].tolist() if hasattr(data, "columns") and "code" in data.columns else []
+            if existing:
+                quote_ctx.modify_user_security(group_name, ModifyUserSecurityOp.DEL, existing)
+        ret, err = quote_ctx.modify_user_security(
+            group_name, ModifyUserSecurityOp.ADD, list(reversed(full_list))
+        )
+        if ret != RET_OK:
+            return {"ok": False, "error": str(err)}
+        return {"ok": True, "codes": full_list}
+    finally:
+        quote_ctx.close()
+
+
+@app.get("/api/stocks")
+async def api_stocks(request: Request):
+    group = request.query_params.get("group", FUTU_GROUP)
+    try:
+        return await asyncio.to_thread(_futu_get_stocks, group)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+
+
+class FutuAddRequest(BaseModel):
+    code: str
+
+
+@app.post("/api/stocks/add")
+async def api_add_stock(req: FutuAddRequest):
+    code = (req.code or "").strip().upper()
+    if not code:
+        raise HTTPException(400, "code is required")
+    code_list = [c for c in code.replace(",", " ").split() if c]
+    if not code_list:
+        raise HTTPException(400, "code is required")
+    try:
+        return await asyncio.to_thread(_futu_add_stocks, FUTU_GROUP, code_list)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
 
 
 # ---------------------------------------------------------------------------

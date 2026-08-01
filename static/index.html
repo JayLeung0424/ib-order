@@ -258,6 +258,30 @@
     .c-mut  { color: var(--muted); }
     .c-grn  { color: var(--green); }
     .c-red  { color: var(--red); }
+
+    /* ── Futu ──────────────────────────────────────────────────────── */
+    .futu-wrap { padding: 16px; }
+    .futu-head h2 { font-size: 18px; font-weight: 700; margin-bottom: 2px; }
+    .futu-head .badge { margin-left: 6px; }
+    .futu-sub { font-size: 12px; margin-bottom: 14px; }
+    .futu-add {
+      display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+      background: var(--bg3); border: 1px solid var(--border);
+      border-radius: var(--r); padding: 12px 14px; margin-bottom: 12px;
+    }
+    .futu-add label { color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .3px; text-transform: uppercase; }
+    .futu-add input { flex: 1; min-width: 220px; text-transform: uppercase; }
+    .futu-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+    #f-tbl thead th { cursor: pointer; user-select: none; }
+    #f-tbl thead th .arr { font-size: 9px; opacity: .45; margin-left: 3px; }
+    #f-tbl thead th.sorted .arr { opacity: 1; color: var(--blue); }
+    #f-tbl thead th.f-sep, #f-tbl tbody td.f-sep { border-left: 1px solid var(--border); padding-left: 16px; }
+    #f-tbl .f-idx { color: var(--muted); text-align: center; width: 36px; }
+    #f-tbl .f-code { font-weight: 700; white-space: nowrap; }
+    #f-tbl .f-name { color: var(--muted); white-space: nowrap; max-width: 180px; overflow: hidden; text-overflow: ellipsis; }
+    #f-tbl .f-chg { font-size: 11px; font-weight: 600; margin-left: 6px; }
+    #f-tbl tbody td { padding: 8px 12px; }
+    .f-spin { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--border); border-top-color: var(--blue); border-radius: 50%; animation: blink 1s linear infinite; vertical-align: -2px; margin-right: 5px; }
   </style>
 </head>
 <body>
@@ -487,6 +511,7 @@
         <button class="tab" id="tb-ord" onclick="showTab('ord')">
           Open Orders&nbsp;<span id="cnt-ord" class="c-mut"></span>
         </button>
+        <button class="tab" id="tb-futu" onclick="showTab('futu')">Futu</button>
       </div>
 
       <!-- Positions -->
@@ -536,6 +561,49 @@
               <tr><td colspan="9" class="empty">Connect to IB to view orders</td></tr>
             </tbody>
           </table>
+        </div>
+      </div>
+
+      <!-- Futu Stock List -->
+      <div id="tp-futu" class="tab-pane">
+        <div class="futu-wrap">
+          <div class="futu-head">
+            <h2>Futu Stock List <span class="badge b-sub">TOP LIST</span></h2>
+            <div class="futu-sub c-mut">只加 US 股票 · 自動大寫 · 按輸入順序排列</div>
+          </div>
+
+          <div class="futu-add">
+            <label>ADD US.</label>
+            <input id="f-add" class="mono" type="text" placeholder="e.g. FSLR TWLO NTRA NET" />
+            <button class="btn-blue" id="f-add-btn">Add</button>
+            <span style="color:var(--muted);margin:0 6px">|</span>
+            <button class="btn" id="f-vol300" title="From web-production-92b9c.up.railway.app">Fetch Vol300</button>
+            <span id="f-add-status" class="c-mut"></span>
+          </div>
+
+          <div class="futu-toolbar">
+            <input id="f-filter" class="mono" type="text" placeholder="Filter code / name..." style="flex:1;min-width:200px" />
+            <button class="btn" id="f-reload">Reload</button>
+            <span id="f-status" class="c-mut"></span>
+          </div>
+
+          <div class="tbl-wrap">
+            <table id="f-tbl">
+              <thead><tr>
+                <th data-k="#">#</th>
+                <th data-k="code">Code</th>
+                <th data-k="name">Name</th>
+                <th class="f-sep" data-k="prev_open">前一天開市<span class="arr">▾</span></th>
+                <th data-k="prev_high">前一天最高<span class="arr">▾</span></th>
+                <th data-k="prev_low">前一天最低<span class="arr">▾</span></th>
+                <th data-k="prev_close">前一天收市<span class="arr">▾</span></th>
+                <th data-k="prev_volume">前一天成交量<span class="arr">▾</span></th>
+                <th class="f-sep" data-k="today_open">今日開市<span class="arr">▾</span></th>
+                <th>漲跌</th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
         </div>
       </div>
     </div><!-- /data panel -->
@@ -1170,7 +1238,7 @@ async function submitModify() {
 
 /* ── Tabs ────────────────────────────────────────────────────────────── */
 function showTab(name) {
-  ['pos','ord'].forEach(n => {
+  ['pos','ord','futu'].forEach(n => {
     document.getElementById(`tp-${n}`).classList.toggle('active', n === name);
     document.getElementById(`tb-${n}`).classList.toggle('active', n === name);
   });
@@ -1202,9 +1270,140 @@ function toast(msg, type) {
   }, 3500);
 }
 
+/* ── Futu stock list ──────────────────────────────────────────────────── */
+const FUTU_GROUP = 'TOP LIST';
+let fData = [], fSortKey = null, fSortDir = 1, fLoaded = false;
+
+const fFmtPrice = v => (v===null||v===undefined||v===''?'-': Number(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}));
+const fFmtVol = v => {
+  if(v===null||v===undefined||v===''||isNaN(v)) return '-';
+  const n=Number(v), abs=Math.abs(n);
+  if(abs>=1e9) return (n/1e9).toFixed(2)+'B';
+  if(abs>=1e6) return (n/1e6).toFixed(2)+'M';
+  if(abs>=1e3) return (n/1e3).toFixed(1)+'K';
+  return String(n);
+};
+function fPct(today, prev){
+  if(today===null||today===undefined||today===''||prev===null||prev===undefined||prev===''||!Number(prev)) return null;
+  const p=(Number(today)-Number(prev))/Number(prev)*100;
+  return isFinite(p) ? p : null;
+}
+
+async function fLoad() {
+  const s = document.getElementById('f-status');
+  s.innerHTML = '<span class="f-spin"></span>Loading...';
+  try {
+    const r = await fetch('/api/stocks?group=' + encodeURIComponent(FUTU_GROUP));
+    const j = await r.json();
+    const tb = document.querySelector('#f-tbl tbody');
+    if (!j.ok) { s.innerHTML=''; tb.innerHTML=`<tr><td colspan=10 class="empty">${esc(j.error||'error')}</td></tr>`; return; }
+    fData = j.stocks || [];
+    s.textContent = fData.length ? `${fData.length} stocks · 按輸入順序` : '';
+    fRender();
+  } catch(e) {
+    s.innerHTML='';
+    document.querySelector('#f-tbl tbody').innerHTML = `<tr><td colspan=10 class="empty">${esc(e)}</td></tr>`;
+  }
+}
+
+function fRender() {
+  const tb = document.querySelector('#f-tbl tbody');
+  const f = document.getElementById('f-filter').value.trim().toLowerCase();
+  let rows = [...fData];
+  if (f) rows = rows.filter(r => [r.code, r.name].some(v => String(v).toLowerCase().includes(f)));
+  if (fSortKey) {
+    rows.sort((a,b) => {
+      let x = a[fSortKey], y = b[fSortKey];
+      const xn = parseFloat(x), yn = parseFloat(y);
+      let c;
+      if (!isNaN(xn) && !isNaN(yn)) c = xn - yn;
+      else c = String(x ?? '').localeCompare(String(y ?? ''));
+      return c * fSortDir;
+    });
+  }
+  document.querySelectorAll('#f-tbl thead th').forEach(th => {
+    const k = th.dataset.k;
+    th.classList.toggle('sorted', k === fSortKey);
+    const arr = th.querySelector('.arr');
+    if (arr) arr.textContent = fSortKey === k ? (fSortDir > 0 ? '▲' : '▼') : '▾';
+  });
+  if (!rows.length) { tb.innerHTML = '<tr><td colspan=10 class="empty">No matching stocks</td></tr>'; return; }
+  tb.innerHTML = rows.map((r, i) => {
+    const code = (r.code ?? '').replace(/^US\./, '');
+    const name = r.name ?? '';
+    const chg = fPct(r.today_open, r.prev_close);
+    const chgStr = chg === null ? '' : `<span class="f-chg ${chg>=0?'c-grn':'c-red'}">${chg>=0?'+':''}${chg.toFixed(2)}%</span>`;
+    const cls = chg === null ? 'c-mut' : (chg >= 0 ? 'c-grn' : 'c-red');
+    return `<tr>
+      <td class="f-idx mono">${i+1}</td>
+      <td class="f-code">${esc(code)}</td>
+      <td class="f-name" title="${esc(name)}">${esc(name)||'-'}</td>
+      <td class="f-sep tr mono">${fFmtPrice(r.prev_open)}</td>
+      <td class="tr mono">${fFmtPrice(r.prev_high)}</td>
+      <td class="tr mono">${fFmtPrice(r.prev_low)}</td>
+      <td class="tr mono">${fFmtPrice(r.prev_close)}</td>
+      <td class="tr mono c-mut">${fFmtVol(r.prev_volume)}</td>
+      <td class="f-sep tr mono ${cls}">${fFmtPrice(r.today_open)}</td>
+      <td class="tr">${chgStr}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function fAdd() {
+  const raw = document.getElementById('f-add').value.trim().toUpperCase();
+  const st = document.getElementById('f-add-status');
+  if (!raw) { st.className = 'c-red'; st.textContent = 'Please enter a code'; return; }
+  st.className = 'c-mut'; st.innerHTML = '<span class="f-spin"></span>Adding...';
+  try {
+    const r = await fetch('/api/stocks/add', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ code: raw })
+    });
+    const j = await r.json();
+    if (!j.ok) { st.className = 'c-red'; st.textContent = j.error || 'Failed'; return; }
+    st.className = 'c-grn';
+    st.textContent = 'Added ' + (j.codes||[]).map(c => c.replace(/^US\./,'')).join(', ');
+    document.getElementById('f-add').value = '';
+    fLoad();
+  } catch(e) { st.className = 'c-red'; st.textContent = e; }
+}
+
+async function fFetchVol300() {
+  const st = document.getElementById('f-add-status');
+  st.className = 'c-mut'; st.innerHTML = '<span class="f-spin"></span>Fetching list...';
+  try {
+    const r = await fetch('https://web-production-92b9c.up.railway.app/api/vol300-copy-symbols');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    const list = (j.list || []).map(s => String(s).toUpperCase()).filter(Boolean);
+    if (!list.length) { st.className = 'c-red'; st.textContent = 'Empty list from server'; return; }
+    document.getElementById('f-add').value = list.join(' ');
+    st.className = 'c-mut'; st.innerHTML = '<span class="f-spin"></span>Adding ' + list.length + ' stocks...';
+    fAdd();
+  } catch(e) { st.className = 'c-red'; st.textContent = 'Fetch failed: ' + e; }
+}
+
+function fInit() {
+  document.getElementById('f-reload').onclick = fLoad;
+  document.getElementById('f-filter').oninput = fRender;
+  document.getElementById('f-add-btn').onclick = fAdd;
+  document.getElementById('f-add').addEventListener('keydown', e => { if (e.key === 'Enter') fAdd(); });
+  document.getElementById('f-vol300').onclick = fFetchVol300;
+  document.querySelectorAll('#f-tbl thead th[data-k]').forEach(th => {
+    if (th.dataset.k === '#') { th.addEventListener('click', () => { fSortKey = null; fSortDir = 1; fRender(); }); return; }
+    th.addEventListener('click', () => {
+      const k = th.dataset.k;
+      if (fSortKey === k) fSortDir *= -1;
+      else { fSortKey = k; fSortDir = 1; }
+      fRender();
+    });
+  });
+}
+
 /* ── Init ────────────────────────────────────────────────────────────── */
 document.addEventListener('DOMContentLoaded', () => {
   frmUpdate();
+  fInit();
   // Auto-refresh is on by default — reflect in UI immediately
   document.getElementById('sw').classList.toggle('on', autoOn);
   // Sync connection state; auto-connect using fallback sequence if not already connected
@@ -1212,6 +1411,10 @@ document.addEventListener('DOMContentLoaded', () => {
     if (d.connected) { connected = true; setConnUI(true, 'IB'); refreshAll(); if (autoOn) startPoll(); }
     else { connectAuto(); }
   }).catch(() => { connectAuto(); });
+  // Lazy-load Futu list when user first opens the tab
+  document.getElementById('tb-futu').addEventListener('click', () => {
+    if (!fLoaded) { fLoaded = true; fLoad(); }
+  });
   // Sync auto-close state
   fetch('/api/autoclose').then(r => r.json()).then(d => {
     autoCloseOn = d.autoclose_enabled;
