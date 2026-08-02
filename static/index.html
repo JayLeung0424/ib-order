@@ -895,6 +895,7 @@ function renderPositions(rows) {
       <td><button class="btn-xs-cancel" onclick="doClosePosition(${JSON.stringify(p.symbol)},${JSON.stringify(p.sec_type)},${exchArg},${curArg},'${closeAction}',${closeQty})">平倉</button></td>
     </tr>`;
   }).join('');
+  if (typeof fRender === 'function' && typeof fData !== 'undefined' && fData.length) fRender();
 }
 
 /* ── Close position ──────────────────────────────────────────────────── */
@@ -1321,12 +1322,17 @@ function fRender() {
     if (arr) arr.textContent = fSortKey === k ? (fSortDir > 0 ? '▲' : '▼') : '▾';
   });
   if (!rows.length) { tb.innerHTML = '<tr><td colspan=10 class="empty">No matching stocks</td></tr>'; return; }
+  const posSyms = new Set(_lastPositions.map(p => String(p.symbol).toUpperCase()));
   tb.innerHTML = rows.map((r, i) => {
     const code = (r.code ?? '').replace(/^US\./, '');
+    const held = posSyms.has(code.toUpperCase());
     const chg = fPct(r.today_open, r.prev_close);
     const chgStr = chg === null ? '' : `<span class="f-chg ${chg>=0?'c-grn':'c-red'}">${chg>=0?'+':''}${chg.toFixed(2)}%</span>`;
     const cls = chg === null ? 'c-mut' : (chg >= 0 ? 'c-grn' : 'c-red');
     const todayOpen = r.today_open ?? '';
+    const orderBtn = held
+      ? `<button class="btn" style="padding:4px 10px;font-size:11px;opacity:.5;cursor:not-allowed" disabled>Held</button>`
+      : `<button class="btn-blue" style="padding:4px 10px;font-size:11px" onclick="fOrder('${esc(code)}','${esc(todayOpen)}')">Order</button>`;
     return `<tr>
       <td class="f-idx mono">${i+1}</td>
       <td class="f-code">${esc(code)}</td>
@@ -1337,7 +1343,7 @@ function fRender() {
       <td class="tr mono c-mut">${fFmtVol(r.prev_volume)}</td>
       <td class="f-sep tr mono ${cls}">${fFmtPrice(r.today_open)}</td>
       <td class="tr">${chgStr}</td>
-      <td class="f-sep tr"><button class="btn-blue" style="padding:4px 10px;font-size:11px" onclick="fOrder('${esc(code)}','${esc(todayOpen)}')">Order</button></td>
+      <td class="f-sep tr">${orderBtn}</td>
     </tr>`;
   }).join('');
 }
@@ -1364,8 +1370,14 @@ async function fOrder(symbol, todayOpen) {
 
 async function fOrderAll() {
   if (!fRenderedRows.length) { toast('No rows to order', 'info'); return; }
-  if (!confirm(`Order all ${fRenderedRows.length} stocks?`)) return;
-  for (const r of fRenderedRows) {
+  const posSyms = new Set(_lastPositions.map(p => String(p.symbol).toUpperCase()));
+  const toOrder = fRenderedRows.filter(r => {
+    const code = (r.code ?? '').replace(/^US\./, '').toUpperCase();
+    return !posSyms.has(code);
+  });
+  if (!toOrder.length) { toast('All rows already held', 'info'); return; }
+  if (!confirm(`Order ${toOrder.length} of ${fRenderedRows.length} stocks? (${fRenderedRows.length - toOrder.length} held)`)) return;
+  for (const r of toOrder) {
     const code = (r.code ?? '').replace(/^US\./, '');
     const todayOpen = r.today_open ?? '';
     await fOrder(code, todayOpen);
