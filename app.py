@@ -39,7 +39,7 @@ asyncio.set_event_loop(asyncio.new_event_loop())
 from ib_insync import (
     IB,
     Stock, Option, Future, Forex, CFD,
-    MarketOrder, LimitOrder, StopOrder, StopLimitOrder,
+    Order, MarketOrder, LimitOrder, StopOrder, StopLimitOrder,
     util,
 )
 
@@ -56,13 +56,46 @@ from pydantic import BaseModel
 # ---------------------------------------------------------------------------
 
 def _next_day_1pm_eastern() -> str:
-    """Return IB-format GTD string for 1 pm Eastern today.
+    """Return IB-format GTD string for 12:30 pm Eastern on the next trading day.
+
+    Skips weekends (Sat/Sun).  Note: does not skip US market holidays; on
+    holidays IB will still accept the order but it will sit until the next
+    session.
 
     IB goodTillDate format: "YYYYMMDD HH:MM:SS {tz}"
-    e.g. "20240116 13:00:00 US/Eastern"
+    e.g. "20240116 12:30:00 US/Eastern"
     """
+    from datetime import timedelta as _td
     now = datetime.now(tz=_EASTERN)
-    return f"{now.strftime('%Y%m%d')} 12:30:00 US/Eastern"
+    cutoff_date = now.date()
+    # If we're already past 12:30 ET today, start from tomorrow.
+    if now.hour > 12 or (now.hour == 12 and now.minute >= 30):
+        cutoff_date = cutoff_date + _td(days=1)
+    # Skip Saturday (5) and Sunday (6): advance to Monday.
+    while cutoff_date.weekday() >= 5:
+        cutoff_date = cutoff_date + _td(days=1)
+    return f"{cutoff_date.strftime('%Y%m%d')} 12:30:00 US/Eastern"
+
+
+def _next_trading_day_1555_et() -> str:
+    """Return IB-format GoodAfterTime string for 15:55 Eastern on the next trading day.
+
+    Used by the Market-on-Close substitute order (a regular MARKET order with
+    GoodAfterTime) so that it activates near market close and executes at
+    market, instead of using MOC which cannot join an OCA group.
+
+    Format: "YYYYMMDD HH:MM:SS {tz}"
+    """
+    from datetime import timedelta as _td
+    now = datetime.now(tz=_EASTERN)
+    target_date = now.date()
+    # If we're already past 15:55 ET today, schedule for tomorrow.
+    if now.hour > 15 or (now.hour == 15 and now.minute >= 55):
+        target_date = target_date + _td(days=1)
+    # Skip Saturday (5) and Sunday (6): advance to Monday.
+    while target_date.weekday() >= 5:
+        target_date = target_date + _td(days=1)
+    return f"{target_date.strftime('%Y%m%d')} 15:55:00 US/Eastern"
 
 # ---------------------------------------------------------------------------
 # Global IB instance
@@ -562,6 +595,8 @@ async def open_orders():
             o = t.order
             s = t.orderStatus
             if s.status not in PENDING_STATUSES:
+                print('trade', t)
+                print()
                 continue
             result.append({
                 "order_id":   o.orderId,
@@ -598,19 +633,78 @@ async def place_order(req: OrderRequest):
         if ot == "bracket":
             if not all([req.entry_price is not None, req.take_profit is not None, req.stop_loss is not None]):
                 raise HTTPException(400, "entry_price, take_profit, stop_loss required for bracket orders")
-            bracket = ib.bracketOrder(
-                req.action.upper(), req.quantity,
-                req.entry_price, req.take_profit, req.stop_loss,
-            )
-            # bracket[0] = parent (entry): GTD cancelled at 1 pm ET if unfilled
-            # bracket[1] = take-profit, bracket[2] = stop-loss: DAY (active only after parent fills)
-            bracket[0].tif          = "GTD"
-            bracket[0].goodTillDate = _next_day_1pm_eastern()
-            bracket[1].tif = "DAY"
-            bracket[2].tif = "DAY"
-            trades = [ib.placeOrder(contract, o) for o in bracket]
+
+            action   = req.action.upper()
+            rev_action = "SELL" if action == "BUY" else "BUY"
+            qty      = req.quantity
+
+            # We build all four legs manually so TP, SL, and the close-at-EOD
+            # market order can share one OCA group (ocaType=1).  IB does NOT
+            # allow MOC orders in an OCA group, so the close leg is a regular
+            # MARKET order with GoodAfterTime set to 15:55 ET — it stays
+            # dormant until near market close, then executes at market.
+            #
+            # When *any* of TP / SL / Close fills, IB cancels the other two
+            # automatically.  The entry (parent) is linked via parentId so TP,
+            # SL, and Close only become active after the entry fills.
+
+            parent_id = ib.client.getReqId()
+            tp_id     = ib.client.getReqId()
+            sl_id     = ib.client.getReqId()
+            close_id  = ib.client.getReqId()
+
+            oca_group = f"bracket_{parent_id}"
+
+            # 1. Entry (parent) — LMT, GTD 12:30 ET, transmit=False
+            entry = LimitOrder(action, qty, req.entry_price)
+            entry.orderId        = parent_id
+            entry.tif            = "GTD"
+            entry.goodTillDate   = _next_day_1pm_eastern()
+            entry.transmit       = False
+
+            # 2. Take-profit (child) — LMT, DAY, OCA, transmit=False
+            tp = LimitOrder(rev_action, qty, req.take_profit)
+            tp.orderId    = tp_id
+            tp.parentId   = parent_id
+            tp.tif        = "DAY"
+            tp.ocaGroup   = oca_group
+            tp.ocaType    = 1
+            tp.transmit   = False
+
+            # 3. Stop-loss (child) — STP, DAY, OCA, transmit=False
+            sl = StopOrder(rev_action, qty, req.stop_loss)
+            sl.orderId    = sl_id
+            sl.parentId   = parent_id
+            sl.tif        = "DAY"
+            sl.ocaGroup   = oca_group
+            sl.ocaType    = 1
+            sl.transmit   = False
+
+            # 4. Close at EOD (child) — MARKET, DAY, GoodAfterTime 15:55 ET,
+            #    OCA, transmit=True  (this sends all four orders to IB)
+            close = MarketOrder(rev_action, qty)
+            close.orderId        = close_id
+            close.parentId       = parent_id
+            close.tif            = "DAY"
+            close.goodAfterTime  = _next_trading_day_1555_et()
+            close.ocaGroup       = oca_group
+            close.ocaType        = 1
+            close.transmit       = True
+
+            # Place all four legs — only the last (close) has transmit=True,
+            # so IB receives them atomically as one bracket + OCA group.
+            trades = [ib.placeOrder(contract, o) for o in (entry, tp, sl, close)]
             await asyncio.sleep(1)
-            return [{"order_id": t.order.orderId, "status": t.orderStatus.status} for t in trades]
+
+            return [
+                {
+                    "order_id":   t.order.orderId,
+                    "status":     t.orderStatus.status,
+                    "order_type": t.order.orderType,
+                    "oca_group":  t.order.ocaGroup,
+                }
+                for t in trades
+            ]
 
         if ot == "market":
             order = MarketOrder(req.action.upper(), req.quantity)

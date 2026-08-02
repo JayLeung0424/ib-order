@@ -260,27 +260,30 @@
     .c-red  { color: var(--red); }
 
     /* ── Futu ──────────────────────────────────────────────────────── */
-    .futu-wrap { padding: 16px; }
-    .futu-head h2 { font-size: 18px; font-weight: 700; margin-bottom: 2px; }
-    .futu-head .badge { margin-left: 6px; }
-    .futu-sub { font-size: 12px; margin-bottom: 14px; }
+    .futu-wrap { padding: 14px 16px; }
     .futu-add {
-      display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+      display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
       background: var(--bg3); border: 1px solid var(--border);
-      border-radius: var(--r); padding: 12px 14px; margin-bottom: 12px;
+      border-radius: var(--r); padding: 10px 14px; margin-bottom: 12px;
     }
+    .futu-add h2 { font-size: 15px; font-weight: 700; margin-right: 4px; }
+    .futu-add h2 .badge { margin-left: 4px; }
     .futu-add label { color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .3px; text-transform: uppercase; }
-    .futu-add input { flex: 1; min-width: 220px; text-transform: uppercase; }
-    .futu-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
-    #f-tbl thead th { cursor: pointer; user-select: none; }
+    .futu-add input { flex: 1; min-width: 200px; text-transform: uppercase; }
+    #f-tbl { table-layout: auto; }
+    #f-tbl thead th { cursor: pointer; user-select: none; white-space: nowrap; padding: 8px 10px; text-align: right; }
     #f-tbl thead th .arr { font-size: 9px; opacity: .45; margin-left: 3px; }
     #f-tbl thead th.sorted .arr { opacity: 1; color: var(--blue); }
-    #f-tbl thead th.f-sep, #f-tbl tbody td.f-sep { border-left: 1px solid var(--border); padding-left: 16px; }
-    #f-tbl .f-idx { color: var(--muted); text-align: center; width: 36px; }
-    #f-tbl .f-code { font-weight: 700; white-space: nowrap; }
-    #f-tbl .f-name { color: var(--muted); white-space: nowrap; max-width: 180px; overflow: hidden; text-overflow: ellipsis; }
-    #f-tbl .f-chg { font-size: 11px; font-weight: 600; margin-left: 6px; }
-    #f-tbl tbody td { padding: 8px 12px; }
+    #f-tbl thead th.f-sep, #f-tbl tbody td.f-sep { border-left: 1px solid var(--border); padding-left: 14px; }
+    #f-tbl thead th[data-k="#"], #f-tbl thead th[data-k="code"] { text-align: left; }
+    #f-tbl thead th#f-order-all { text-align: right; }
+    #f-tbl thead th[data-k="#"] { text-align: center; }
+    #f-tbl .f-idx { color: var(--muted); text-align: center; width: 32px; }
+    #f-tbl .f-code { font-weight: 700; white-space: nowrap; text-align: left; }
+    #f-tbl .f-chg { font-size: 11px; font-weight: 600; margin-left: 4px; }
+    #f-tbl tbody td { padding: 7px 10px; }
+    #f-tbl tbody td:last-child { text-align: right; }
+    #f-order-all { padding: 4px; }
     .f-spin { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--border); border-top-color: var(--blue); border-radius: 50%; animation: blink 1s linear infinite; vertical-align: -2px; margin-right: 5px; }
   </style>
 </head>
@@ -567,24 +570,15 @@
       <!-- Futu Stock List -->
       <div id="tp-futu" class="tab-pane">
         <div class="futu-wrap">
-          <div class="futu-head">
-            <h2>Futu Stock List <span class="badge b-sub">TOP LIST</span></h2>
-            <div class="futu-sub c-mut">只加 US 股票 · 自動大寫 · 按輸入順序排列</div>
-          </div>
-
           <div class="futu-add">
+            <h2>Futu <span class="badge b-sub">TOP LIST</span></h2>
+            <span class="c-mut" style="font-size:11px">只加 US 股票</span>
+            <span style="flex:1"></span>
             <label>ADD US.</label>
             <input id="f-add" class="mono" type="text" placeholder="e.g. FSLR TWLO NTRA NET" />
             <button class="btn-blue" id="f-add-btn">Add</button>
-            <span style="color:var(--muted);margin:0 6px">|</span>
             <button class="btn" id="f-vol300" title="From web-production-92b9c.up.railway.app">Fetch Vol300</button>
             <span id="f-add-status" class="c-mut"></span>
-          </div>
-
-          <div class="futu-toolbar">
-            <input id="f-filter" class="mono" type="text" placeholder="Filter code / name..." style="flex:1;min-width:200px" />
-            <button class="btn" id="f-reload">Reload</button>
-            <span id="f-status" class="c-mut"></span>
           </div>
 
           <div class="tbl-wrap">
@@ -592,7 +586,6 @@
               <thead><tr>
                 <th data-k="#">#</th>
                 <th data-k="code">Code</th>
-                <th data-k="name">Name</th>
                 <th class="f-sep" data-k="prev_open">前一天開市<span class="arr">▾</span></th>
                 <th data-k="prev_high">前一天最高<span class="arr">▾</span></th>
                 <th data-k="prev_low">前一天最低<span class="arr">▾</span></th>
@@ -600,6 +593,7 @@
                 <th data-k="prev_volume">前一天成交量<span class="arr">▾</span></th>
                 <th class="f-sep" data-k="today_open">今日開市<span class="arr">▾</span></th>
                 <th>漲跌</th>
+                <th class="f-sep" id="f-order-all" style="text-align:right"><button class="btn-blue" style="padding:4px 10px;font-size:11px;pointer-events:none">ORDER ALL</button></th>
               </tr></thead>
               <tbody></tbody>
             </table>
@@ -1272,7 +1266,7 @@ function toast(msg, type) {
 
 /* ── Futu stock list ──────────────────────────────────────────────────── */
 const FUTU_GROUP = 'TOP LIST';
-let fData = [], fSortKey = null, fSortDir = 1, fLoaded = false;
+let fData = [], fSortKey = null, fSortDir = 1, fLoaded = false, fRenderedRows = [];
 
 const fFmtPrice = v => (v===null||v===undefined||v===''?'-': Number(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}));
 const fFmtVol = v => {
@@ -1290,8 +1284,8 @@ function fPct(today, prev){
 }
 
 async function fLoad() {
-  const s = document.getElementById('f-status');
-  s.innerHTML = '<span class="f-spin"></span>Loading...';
+  const s = document.getElementById('f-add-status');
+  s.className = 'c-mut'; s.innerHTML = '<span class="f-spin"></span>Loading...';
   try {
     const r = await fetch('/api/stocks?group=' + encodeURIComponent(FUTU_GROUP));
     const j = await r.json();
@@ -1308,9 +1302,7 @@ async function fLoad() {
 
 function fRender() {
   const tb = document.querySelector('#f-tbl tbody');
-  const f = document.getElementById('f-filter').value.trim().toLowerCase();
   let rows = [...fData];
-  if (f) rows = rows.filter(r => [r.code, r.name].some(v => String(v).toLowerCase().includes(f)));
   if (fSortKey) {
     rows.sort((a,b) => {
       let x = a[fSortKey], y = b[fSortKey];
@@ -1321,6 +1313,7 @@ function fRender() {
       return c * fSortDir;
     });
   }
+  fRenderedRows = rows;
   document.querySelectorAll('#f-tbl thead th').forEach(th => {
     const k = th.dataset.k;
     th.classList.toggle('sorted', k === fSortKey);
@@ -1330,14 +1323,13 @@ function fRender() {
   if (!rows.length) { tb.innerHTML = '<tr><td colspan=10 class="empty">No matching stocks</td></tr>'; return; }
   tb.innerHTML = rows.map((r, i) => {
     const code = (r.code ?? '').replace(/^US\./, '');
-    const name = r.name ?? '';
     const chg = fPct(r.today_open, r.prev_close);
     const chgStr = chg === null ? '' : `<span class="f-chg ${chg>=0?'c-grn':'c-red'}">${chg>=0?'+':''}${chg.toFixed(2)}%</span>`;
     const cls = chg === null ? 'c-mut' : (chg >= 0 ? 'c-grn' : 'c-red');
+    const todayOpen = r.today_open ?? '';
     return `<tr>
       <td class="f-idx mono">${i+1}</td>
       <td class="f-code">${esc(code)}</td>
-      <td class="f-name" title="${esc(name)}">${esc(name)||'-'}</td>
       <td class="f-sep tr mono">${fFmtPrice(r.prev_open)}</td>
       <td class="tr mono">${fFmtPrice(r.prev_high)}</td>
       <td class="tr mono">${fFmtPrice(r.prev_low)}</td>
@@ -1345,8 +1337,39 @@ function fRender() {
       <td class="tr mono c-mut">${fFmtVol(r.prev_volume)}</td>
       <td class="f-sep tr mono ${cls}">${fFmtPrice(r.today_open)}</td>
       <td class="tr">${chgStr}</td>
+      <td class="f-sep tr"><button class="btn-blue" style="padding:4px 10px;font-size:11px" onclick="fOrder('${esc(code)}','${esc(todayOpen)}')">Order</button></td>
     </tr>`;
   }).join('');
+}
+
+async function fOrder(symbol, todayOpen) {
+  const quick = document.getElementById('o-quick');
+  quick.value = 'Loading...';
+  try {
+    const r = await fetch('https://web-production-92b9c.up.railway.app/api/predict-stock', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbol, manual_input: String(todayOpen ?? '') }),
+    });
+    const j = await r.json();
+    const copy = j?.auto_pos_copy?.copy ?? '';
+    quick.value = copy;
+    toast(`Fetched ${symbol}: ${copy || '(empty)'}`, 'ok');
+    if (copy) quickPlace();
+  } catch(e) {
+    quick.value = '';
+    toast(`Futu predict failed: ${e.message}`, 'err');
+  }
+}
+
+async function fOrderAll() {
+  if (!fRenderedRows.length) { toast('No rows to order', 'info'); return; }
+  if (!confirm(`Order all ${fRenderedRows.length} stocks?`)) return;
+  for (const r of fRenderedRows) {
+    const code = (r.code ?? '').replace(/^US\./, '');
+    const todayOpen = r.today_open ?? '';
+    await fOrder(code, todayOpen);
+  }
 }
 
 async function fAdd() {
@@ -1384,11 +1407,10 @@ async function fFetchVol300() {
 }
 
 function fInit() {
-  document.getElementById('f-reload').onclick = fLoad;
-  document.getElementById('f-filter').oninput = fRender;
   document.getElementById('f-add-btn').onclick = fAdd;
   document.getElementById('f-add').addEventListener('keydown', e => { if (e.key === 'Enter') fAdd(); });
   document.getElementById('f-vol300').onclick = fFetchVol300;
+  document.getElementById('f-order-all').onclick = fOrderAll;
   document.querySelectorAll('#f-tbl thead th[data-k]').forEach(th => {
     if (th.dataset.k === '#') { th.addEventListener('click', () => { fSortKey = null; fSortDir = 1; fRender(); }); return; }
     th.addEventListener('click', () => {
