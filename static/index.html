@@ -206,6 +206,7 @@
     .leg-entry { background: rgba(88,166,255,.2); color: var(--blue); }
     .leg-tp    { background: rgba(63,185,80,.2);  color: var(--green); }
     .leg-sl    { background: rgba(248,81,73,.2);   color: var(--red); }
+    .leg-eod   { background: rgba(224,102,200,.22); color: #e066c8; }
 
     .empty { text-align: center; padding: 40px; color: var(--muted); font-size: 13px; }
 
@@ -973,7 +974,7 @@ function renderOrders(rows) {
         legTag = 'SL'; legClass = 'leg-sl';
       } else {
         // MKT child with goodAfterTime = the EOD auto-close leg of the bracket
-        legTag = 'EOD'; legClass = 'leg-tp';
+        legTag = 'EOD'; legClass = 'leg-eod';
       }
       const isLast = (i === sortedKids.length - 1);
       html += renderOrderRow(kid, 'bracket-child' + (isLast ? ' bracket-last' : ''), legClass, legTag);
