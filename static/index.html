@@ -954,26 +954,28 @@ function renderOrders(rows) {
   // Render grouped (bracket) orders first
   for (const parent of bracketParents) {
     const kids = childrenMap[parent.order_id] || [];
+    const legRank = (o) => {
+      const ot = (o.order_type || '').toUpperCase();
+      if (ot === 'LMT' || ot === 'LMT MKT') return 0;   // TP
+      if (ot === 'STP' || ot === 'STP LMT')   return 1; // SL
+      return 2;                                          // EOD (MKT close)
+    };
+    const sortedKids = [...kids].sort((a, b) => legRank(a) - legRank(b));
     html += renderOrderRow(parent, 'bracket-group', 'leg-entry', 'Entry');
-    for (let i = 0; i < kids.length; i++) {
-      const kid = kids[i];
+    for (let i = 0; i < sortedKids.length; i++) {
+      const kid = sortedKids[i];
       // Determine leg type by order characteristics
       let legTag = '', legClass = '';
-      if (kid.order_type === 'LMT' || kid.order_type === 'LMT MKT') {
-        // TP is typically a limit order as child
-        // If the parent is a BUY, TP is SELL LMT above entry; SL is SELL STP below entry
-        // If the parent is a SELL, TP is BUY LMT below entry; SL is BUY STP above entry
-        // Use action to distinguish: child actions same as parent => it's the SL (stop)
-        // Actually, for ib_insync bracketOrder:
-        //   BUY bracket: parent=BUY LMT, TP=SELL LMT, SL=SELL STP
-        //   SELL bracket: parent=SELL LMT, TP=BUY LMT, SL=BUY STP
-        // TP and SL both have opposite action from parent.
-        // Distinguish by order type: LMT = TP, STP = SL
+      const ot = (kid.order_type || '').toUpperCase();
+      if (ot === 'LMT' || ot === 'LMT MKT') {
         legTag = 'TP'; legClass = 'leg-tp';
-      } else {
+      } else if (ot === 'STP' || ot === 'STP LMT') {
         legTag = 'SL'; legClass = 'leg-sl';
+      } else {
+        // MKT child with goodAfterTime = the EOD auto-close leg of the bracket
+        legTag = 'EOD'; legClass = 'leg-tp';
       }
-      const isLast = (i === kids.length - 1);
+      const isLast = (i === sortedKids.length - 1);
       html += renderOrderRow(kid, 'bracket-child' + (isLast ? ' bracket-last' : ''), legClass, legTag);
     }
   }
