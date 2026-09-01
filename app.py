@@ -109,8 +109,8 @@ def _next_trading_day_1555_et() -> str:
 #   TG_CHAT_ID    – Target chat/channel id (int, or -100… for channels)
 # If either is missing, notifications are silently skipped.
 
-TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "8561191188:AAFKh5fPWl0ycf8vUFGBgHvOnd1rnMHy4wg")
-TG_CHAT_ID   = os.environ.get("TG_CHAT_ID", "1055293440")
+TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "")
+TG_CHAT_ID   = os.environ.get("TG_CHAT_ID", "")
 
 
 def _tg_send(text: str) -> None:
