@@ -89,10 +89,8 @@
     .toggle-row { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
     .sw { width: 30px; height: 16px; background: var(--border); border-radius: 10px; position: relative; cursor: pointer; transition: background .2s; }
     .sw.on    { background: var(--blue); }
-    .sw.ac-on { background: var(--red); animation: blink 2s ease-in-out infinite; }
     .sw::after { content:''; position:absolute; width:12px; height:12px; background:#fff; border-radius:50%; top:2px; left:2px; transition:transform .2s; }
     .sw.on::after    { transform: translateX(14px); }
-    .sw.ac-on::after { transform: translateX(14px); }
 
     /* ── Layout ────────────────────────────────────────────────────── */
     .page { max-width: 1440px; margin: 0 auto; padding: 18px 20px; }
@@ -208,6 +206,9 @@
     .leg-sl    { background: rgba(248,81,73,.2);   color: var(--red); }
     .leg-eod   { background: rgba(224,102,200,.22); color: #e066c8; }
 
+    .pnl-pos { color: var(--green); font-weight: 600; }
+    .pnl-neg { color: var(--red);   font-weight: 600; }
+
     .empty { text-align: center; padding: 40px; color: var(--muted); font-size: 13px; }
 
     /* ── Badges ────────────────────────────────────────────────────── */
@@ -294,11 +295,6 @@
 <nav>
   <div class="nav-brand">IB <span>Order Manager</span></div>
   <div class="nav-spacer"></div>
-  <!-- Auto-close toggle -->
-  <div class="toggle-row" id="sw-ac-row" title="cancel all open orders · close all positions at market">
-    <div id="sw-ac" class="sw" onclick="toggleAutoClose()"></div>
-    <span id="sw-ac-lbl" style="color:var(--muted)">收市平倉</span>
-  </div>
   <!-- Auto-refresh toggle -->
   <div class="toggle-row">
     <div id="sw" class="sw" onclick="toggleAuto()" title="Auto-refresh every 1 s"></div>
@@ -615,9 +611,6 @@
 /* ── State ───────────────────────────────────────────────────────────── */
 let connected   = false;
 let autoOn      = true;
-let autoCloseOn = false;
-let _acCancelTime = '15:50';
-let _acCloseTime  = '15:55';
 let timer       = null;
 let priceTimer  = null;
 let _lastOrders = [];
@@ -716,6 +709,9 @@ function setConnUI(on, info = '') {
   document.getElementById('btn-paper').style.display = on ? 'none' : '';
   document.getElementById('btn-live').style.display  = on ? 'none' : '';
   document.getElementById('btn-dis').style.display   = on ? '' : 'none';
+  const fOrderAllBtn = document.querySelector('#f-order-all > button');
+  if (fOrderAllBtn) fOrderAllBtn.disabled = !on;
+  if (fLoaded) fRender();
 }
 
 /* ── Refresh ─────────────────────────────────────────────────────────── */
@@ -781,29 +777,6 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
-/* ── Auto-close toggle ───────────────────────────────────────────────── */
-async function toggleAutoClose() {
-  autoCloseOn = !autoCloseOn;
-  try {
-    await api('POST', '/api/autoclose', { enabled: autoCloseOn });
-    setAutoCloseUI(autoCloseOn);
-    toast(autoCloseOn
-      ? `收市平倉已啟動 — ${_acCancelTime} 取消掛單 · ${_acCloseTime} 市價平倉`
-      : '收市平倉已停用', autoCloseOn ? 'err' : 'info');
-  } catch(e) {
-    autoCloseOn = !autoCloseOn; // revert on error
-    toast(`Auto-close error: ${e.message}`, 'err');
-  }
-}
-
-function setAutoCloseUI(on) {
-  const sw  = document.getElementById('sw-ac');
-  const lbl = document.getElementById('sw-ac-lbl');
-  sw.className = 'sw' + (on ? ' ac-on' : '');
-  lbl.style.color = on ? 'var(--red)' : 'var(--muted)';
-  lbl.textContent = on ? '收市平倉 ✓' : '收市平倉';
-}
-
 /* ── Account cards ───────────────────────────────────────────────────── */
 function fmt(v) {
   const n = parseFloat(v);
@@ -829,8 +802,13 @@ function renderAccount(d) {
   setCard('c-cash',   d.TotalCashValue);
   setCard('c-bp',     d.BuyingPower);
   setCard('c-avail',  d.AvailableFunds);
-  setCard('c-upnl',   d.UnrealizedPnL, true, _FX_HKD);
-  setCard('c-rpnl',   d.RealizedPnL,   true, _FX_HKD);
+  // P&L cards are shown in HKD. ib_insync returns UnrealizedPnL/RealizedPnL in
+  // BASE (account base ccy) by the backend's preference order, so only
+  // convert from USD→HKD when the underlying value is actually USD.
+  const upnlFx = (d.UnrealizedPnL && (d.UnrealizedPnL.currency || '').toUpperCase() === 'USD') ? _FX_HKD : 1;
+  const rpnlFx = (d.RealizedPnL   && (d.RealizedPnL.currency   || '').toUpperCase() === 'USD') ? _FX_HKD : 1;
+  setCard('c-upnl',   d.UnrealizedPnL, true, upnlFx);
+  setCard('c-rpnl',   d.RealizedPnL,   true, rpnlFx);
   setCard('c-gpv',    d.GrossPositionValue);
 }
 
@@ -870,15 +848,19 @@ function renderPositions(rows) {
     const exchArg     = JSON.stringify(p.exchange || 'SMART');
     const curArg      = JSON.stringify(p.currency || 'USD');
     const { tp, sl }  = _findTPSL(p.symbol, p.sec_type, p.position);
+    // Position P&L and market value come from ib_insync portfolio (BASE ccy).
+    // Only convert USD→HKD when the contract's currency is USD; HKD-denominated
+    // positions are already in HKD and must not be re-multiplied.
+    const posFx = (p.currency || '').toUpperCase() === 'USD' ? _FX_HKD : 1;
     const tpPx = tp ? parseFloat(tp.lmt_price) : NaN;
     const tpPnL = (!isNaN(tpPx) && p.avg_cost)
-      ? (tpPx - p.avg_cost) * p.position * _FX_HKD : NaN;
+      ? (tpPx - p.avg_cost) * p.position * posFx : NaN;
     const tpHtml = tp
       ? `<span class="c-grn">${fmt(tp.lmt_price)}</span> <span class="c-grn">(${signed(tpPnL)})</span>`
       : '<span class="c-mut">—</span>';
     const slPx = sl ? parseFloat(sl.aux_price || sl.lmt_price) : NaN;
     const slPnL = (!isNaN(slPx) && p.avg_cost)
-      ? (slPx - p.avg_cost) * p.position * _FX_HKD : NaN;
+      ? (slPx - p.avg_cost) * p.position * posFx : NaN;
     const slHtml = sl
       ? `<span class="c-red">${fmt(sl.aux_price || sl.lmt_price)}</span> <span class="c-red">(${signed(slPnL)})</span>`
       : '<span class="c-mut">—</span>';
@@ -890,9 +872,9 @@ function renderPositions(rows) {
       <td class="tr mono">${tpHtml}</td>
       <td class="tr mono">${slHtml}</td>
       <td class="tr mono">${fmt(p.market_price)}</td>
-      <td class="tr mono">${Math.round(p.market_value * _FX_HKD).toLocaleString('en-US')}</td>
-      <td class="tr mono ${upClass}">${Math.round(p.unrealized_pnl * _FX_HKD).toLocaleString('en-US')}</td>
-      <td class="tr mono ${rpClass}">${Math.round(p.realized_pnl * _FX_HKD).toLocaleString('en-US')}</td>
+      <td class="tr mono">${Math.round(p.market_value * posFx).toLocaleString('en-US')}</td>
+      <td class="tr mono ${upClass}">${Math.round(p.unrealized_pnl * posFx).toLocaleString('en-US')}</td>
+      <td class="tr mono ${rpClass}">${Math.round(p.realized_pnl * posFx).toLocaleString('en-US')}</td>
       <td><button class="btn-xs-cancel" onclick="doClosePosition(${JSON.stringify(p.symbol)},${JSON.stringify(p.sec_type)},${exchArg},${curArg},'${closeAction}',${closeQty})">平倉</button></td>
     </tr>`;
   }).join('');
@@ -963,6 +945,10 @@ function renderOrders(rows) {
     };
     const sortedKids = [...kids].sort((a, b) => legRank(a) - legRank(b));
     html += renderOrderRow(parent, 'bracket-group', 'leg-entry', 'Entry');
+    const entryPrice = (parent.lmt_price && parent.lmt_price > 0)
+                       ? parent.lmt_price
+                       : (parent.aux_price && parent.aux_price > 0) ? parent.aux_price : null;
+    const entryAction = parent.action;
     for (let i = 0; i < sortedKids.length; i++) {
       const kid = sortedKids[i];
       // Determine leg type by order characteristics
@@ -977,7 +963,7 @@ function renderOrders(rows) {
         legTag = 'EOD'; legClass = 'leg-eod';
       }
       const isLast = (i === sortedKids.length - 1);
-      html += renderOrderRow(kid, 'bracket-child' + (isLast ? ' bracket-last' : ''), legClass, legTag);
+      html += renderOrderRow(kid, 'bracket-child' + (isLast ? ' bracket-last' : ''), legClass, legTag, entryPrice, entryAction);
     }
   }
 
@@ -988,9 +974,12 @@ function renderOrders(rows) {
   }
 
   body.innerHTML = html;
+  // Re-render Futu list so the Order/Ordered button state stays in sync with
+  // the latest open orders (a stock with an active order should disable).
+  if (typeof fRender === 'function' && typeof fData !== 'undefined' && fData.length) fRender();
 }
 
-function renderOrderRow(o, rowClass, legClass, legTag) {
+function renderOrderRow(o, rowClass, legClass, legTag, entryPrice, entryAction) {
   const ab  = o.action === 'BUY' ? 'b-buy' : 'b-sell';
   const lmt = (o.lmt_price && o.lmt_price > 0)
                 ? fmt(o.lmt_price)
@@ -999,13 +988,32 @@ function renderOrderRow(o, rowClass, legClass, legTag) {
   let displayType = esc(o.order_type);
   if (o.tif && o.tif !== 'DAY') displayType += ` <span class="c-mut" style="font-size:10px">${esc(o.tif)}</span>`;
 
+  // Compute total earnings/loss for TP / SL legs relative to the entry price.
+  // Multiplier 7.8 accounts for the contract multiplier of the underlying.
+  let pnl = '';
+  if (entryPrice && (legClass === 'leg-tp' || legClass === 'leg-sl')) {
+    const legPrice = (o.lmt_price && o.lmt_price > 0)
+                       ? o.lmt_price
+                       : (o.aux_price && o.aux_price > 0) ? o.aux_price : null;
+    if (legPrice) {
+      const buyEntry = (entryAction || '').toUpperCase() === 'BUY';
+      const raw = buyEntry ? (legPrice - entryPrice) : (entryPrice - legPrice);
+      const val = raw * (o.quantity || 0) * 7.8;
+      if (val) {
+        const sign = val > 0 ? '+' : '-';
+        const cls  = val >= 0 ? 'pnl-pos' : 'pnl-neg';
+        pnl = ` <span class="${cls}" style="font-size:11px">(${sign}${fmt(Math.abs(val))})</span>`;
+      }
+    }
+  }
+
   return `<tr class="${rowClass}">
     <td class="c-mut mono" style="font-size:11px">${o.order_id}</td>
     <td>${tagHtml}<strong>${esc(o.symbol)}</strong> <span class="c-mut" style="font-size:11px">${esc(o.sec_type)}</span></td>
     <td><span class="badge ${ab}">${esc(o.action)}</span></td>
     <td class="tr mono">${fmt(o.quantity)}</td>
     <td class="c-mut">${displayType}</td>
-    <td class="tr mono">${lmt}</td>
+    <td class="tr mono">${lmt}${pnl}</td>
     <td class="tr mono">${fmt(o.filled)} / ${fmt(o.quantity)}</td>
     <td><span class="badge ${statusBadge(o.status)}">${esc(o.status)}</span></td>
     <td>
@@ -1326,16 +1334,22 @@ function fRender() {
   });
   if (!rows.length) { tb.innerHTML = '<tr><td colspan=10 class="empty">No matching stocks</td></tr>'; return; }
   const posSyms = new Set(_lastPositions.map(p => String(p.symbol).toUpperCase()));
+  const ordSyms = new Set(_lastOrders.map(o => String(o.symbol).toUpperCase()));
   tb.innerHTML = rows.map((r, i) => {
     const code = (r.code ?? '').replace(/^US\./, '');
     const held = posSyms.has(code.toUpperCase());
+    const ordered = ordSyms.has(code.toUpperCase());
     const chg = fPct(r.today_open, r.prev_close);
     const chgStr = chg === null ? '' : `<span class="f-chg ${chg>=0?'c-grn':'c-red'}">${chg>=0?'+':''}${chg.toFixed(2)}%</span>`;
     const cls = chg === null ? 'c-mut' : (chg >= 0 ? 'c-grn' : 'c-red');
     const todayOpen = r.today_open ?? '';
-    const orderBtn = held
-      ? `<button class="btn" style="padding:4px 10px;font-size:11px;opacity:.5;cursor:not-allowed" disabled>Held</button>`
-      : `<button class="btn-blue" style="padding:4px 10px;font-size:11px" onclick="fOrder('${esc(code)}','${esc(todayOpen)}')">Order</button>`;
+    const orderBtn = !connected
+      ? `<button class="btn-blue" style="padding:4px 10px;font-size:11px;opacity:.5;cursor:not-allowed" disabled>Order</button>`
+      : held
+        ? `<button class="btn" style="padding:4px 10px;font-size:11px;opacity:.5;cursor:not-allowed" disabled>Held</button>`
+        : ordered
+          ? `<button class="btn" style="padding:4px 10px;font-size:11px;opacity:.5;cursor:not-allowed" disabled>Ordered</button>`
+          : `<button class="btn-blue" style="padding:4px 10px;font-size:11px" onclick="fOrder('${esc(code)}','${esc(todayOpen)}')">Order</button>`;
     return `<tr>
       <td class="f-idx mono">${i+1}</td>
       <td class="f-code">${esc(code)}</td>
@@ -1352,6 +1366,7 @@ function fRender() {
 }
 
 async function fOrder(symbol, todayOpen) {
+  if (!connected) { toast('Not connected to IB', 'err'); return; }
   const quick = document.getElementById('o-quick');
   quick.value = 'Loading...';
   try {
@@ -1372,14 +1387,16 @@ async function fOrder(symbol, todayOpen) {
 }
 
 async function fOrderAll() {
+  if (!connected) { toast('Not connected to IB', 'err'); return; }
   if (!fRenderedRows.length) { toast('No rows to order', 'info'); return; }
   const posSyms = new Set(_lastPositions.map(p => String(p.symbol).toUpperCase()));
+  const ordSyms = new Set(_lastOrders.map(o => String(o.symbol).toUpperCase()));
   const toOrder = fRenderedRows.filter(r => {
     const code = (r.code ?? '').replace(/^US\./, '').toUpperCase();
-    return !posSyms.has(code);
+    return !posSyms.has(code) && !ordSyms.has(code);
   });
-  if (!toOrder.length) { toast('All rows already held', 'info'); return; }
-  if (!confirm(`Order ${toOrder.length} of ${fRenderedRows.length} stocks? (${fRenderedRows.length - toOrder.length} held)`)) return;
+  if (!toOrder.length) { toast('All rows already held or ordered', 'info'); return; }
+  if (!confirm(`Order ${toOrder.length} of ${fRenderedRows.length} stocks? (${fRenderedRows.length - toOrder.length} held/ordered)`)) return;
   for (const r of toOrder) {
     const code = (r.code ?? '').replace(/^US\./, '');
     const todayOpen = r.today_open ?? '';
@@ -1452,15 +1469,6 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('tb-futu').addEventListener('click', () => {
     if (!fLoaded) { fLoaded = true; fLoad(); }
   });
-  // Sync auto-close state
-  fetch('/api/autoclose').then(r => r.json()).then(d => {
-    autoCloseOn = d.autoclose_enabled;
-    if (d.cancel_orders_time)  _acCancelTime = d.cancel_orders_time;
-    if (d.close_positions_time) _acCloseTime  = d.close_positions_time;
-    const tip = `${_acCancelTime} cancel all open orders · ${_acCloseTime} close all positions at market`;
-    document.getElementById('sw-ac-row')?.setAttribute('title', tip);
-    setAutoCloseUI(autoCloseOn);
-  }).catch(() => {});
 });
 </script>
 </body>

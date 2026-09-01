@@ -17,9 +17,11 @@ Ports:  IB Gateway paper=4002  |  IB Gateway live=4001
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import urllib.request
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 try:
     from zoneinfo import ZoneInfo
@@ -49,6 +51,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from collections import deque
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +100,157 @@ def _next_trading_day_1555_et() -> str:
         target_date = target_date + _td(days=1)
     return f"{target_date.strftime('%Y%m%d')} 15:55:00 US/Eastern"
 
+
+# ---------------------------------------------------------------------------
+# Telegram notifications
+# ---------------------------------------------------------------------------
+# Configure via environment variables:
+#   TG_BOT_TOKEN  – Bot token from @BotFather
+#   TG_CHAT_ID    – Target chat/channel id (int, or -100… for channels)
+# If either is missing, notifications are silently skipped.
+
+TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "8561191188:AAFKh5fPWl0ycf8vUFGBgHvOnd1rnMHy4wg")
+TG_CHAT_ID   = os.environ.get("TG_CHAT_ID", "1055293440")
+
+
+def _tg_send(text: str) -> None:
+    """Send a message to Telegram.  Runs in a worker thread."""
+    if not TG_BOT_TOKEN or not TG_CHAT_ID:
+        return
+    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
+    payload = json.dumps({
+        "chat_id":    TG_CHAT_ID,
+        "text":       text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=payload, headers={"Content-Type": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            resp.read()
+    except Exception as exc:
+        print(f"[tg] send failed: {exc}")
+
+
+def _fmt_price(p: float) -> str:
+    """Format a price: trim trailing zeros for clean display."""
+    if p is None:
+        return "0"
+    f = float(p)
+    s = f"{f:,.2f}"
+    return s
+
+
+def _fmt_diff(d: float) -> str:
+    """Format a signed price difference, e.g. '+20' / '-40' (rounded to int)."""
+    if d is None:
+        d = 0
+    f = round(float(d))
+    sign = "+" if f >= 0 else "-"
+    return f"{sign}{abs(f):,}"
+
+
+def _format_bracket_line(contract, entry, tp, sl, close) -> str:
+    """Multi-line bracket summary.
+
+        AAPL (EOD - 15:55)
+        BUY 5 @160 200(+1,560.00) 120(-1,560.00)
+
+    P&L = (leg - entry) * qty * 7.8  (sign flipped for SELL/short entries),
+    matching the open-orders TP/SL P&L display.
+    """
+    sym    = getattr(contract, "symbol", "") or ""
+    action = (getattr(entry, "action", "") or "").upper()
+    qty    = float(getattr(entry, "totalQuantity", 0) or 0)
+    e_px   = float(getattr(entry, "lmtPrice", 0) or 0)
+    tp_px  = float(getattr(tp, "lmtPrice", 0) or 0)
+    sl_px  = float(getattr(sl, "auxPrice", 0) or 0)
+
+    # EOD time from the close leg's GoodAfterTime, e.g.
+    # "20260116 15:55:00 US/Eastern" -> "15:55"
+    eod = ""
+    if close is not None:
+        gat = getattr(close, "goodAfterTime", "") or ""
+        parts = gat.split()
+        if len(parts) >= 2:
+            t = parts[1]
+            eod = t[:5] if len(t) >= 5 else t
+
+    _FX = 7.8  # USD->HKD conversion / contract multiplier used by open-orders view
+    buy_entry = action == "BUY"
+
+    def leg_pnl(leg_price: float) -> float:
+        raw = (leg_price - e_px) if buy_entry else (e_px - leg_price)
+        return raw * qty * _FX
+
+    tp_pnl = leg_pnl(tp_px)
+    sl_pnl = leg_pnl(sl_px)
+
+    header = f"{sym} (EOD - {eod})" if eod else sym
+    body   = (
+        f"{action} {int(qty)} @{_fmt_price(e_px)}\n"
+        f"TP {_fmt_price(tp_px)}({_fmt_diff(tp_pnl)})\n"
+        f"SL {_fmt_price(sl_px)}({_fmt_diff(sl_pnl)})"
+    )
+    return f"{header}\n{body}"
+
+
+def _format_single_line(contract, order) -> str:
+    """One-line summary for a non-bracket order."""
+    sym    = getattr(contract, "symbol", "") or ""
+    action = getattr(order, "action", "") or ""
+    qty    = float(getattr(order, "totalQuantity", 0) or 0)
+    otype  = (getattr(order, "orderType", "") or "").upper()
+    lmt    = float(getattr(order, "lmtPrice", 0) or 0)
+    stp    = float(getattr(order, "auxPrice", 0) or 0)
+    tif    = getattr(order, "tif", "") or ""
+
+    parts = [sym, action, _fmt_price(qty)]
+    if otype == "LMT":
+        parts.append(f"LMT @ {_fmt_price(lmt)}")
+    elif otype == "STP":
+        parts.append(f"STP @ {_fmt_price(stp)}")
+    elif otype in ("STP_LMT", "STOP_LIMIT"):
+        parts.append(f"STP_LMT {_fmt_price(lmt)} / {_fmt_price(stp)}")
+    elif otype == "MKT":
+        parts.append("MKT")
+    else:
+        parts.append(otype)
+    if tif and tif != "DAY":
+        parts.append(tif)
+    return " ".join(parts)
+
+
+async def _tg_notify_order(contract, order) -> None:
+    """Send a Telegram notification describing a placed order."""
+    if not TG_BOT_TOKEN or not TG_CHAT_ID:
+        return
+    body = _format_single_line(contract, order)
+    await asyncio.to_thread(_tg_send, body)
+
+
+async def _tg_notify_orders(contract, orders) -> None:
+    """Notify about multiple legs (e.g. a bracket order).
+
+    `orders` is the list [entry, tp, sl, close] as built in place_order().
+    Falls back to a per-leg dump if the shape is not a recognisable bracket.
+    """
+    if not TG_BOT_TOKEN or not TG_CHAT_ID or not orders:
+        return
+
+    # Recognise a bracket: entry is a LMT with parentId 0, followed by
+    # children with parentId == entry.orderId.  We also expect 4 legs.
+    if len(orders) >= 3:
+        entry, tp, sl = orders[0], orders[1], orders[2]
+        close = orders[3] if len(orders) >= 4 else None
+        body = _format_bracket_line(contract, entry, tp, sl, close)
+    else:
+        body = "\n".join(_format_single_line(contract, o) for o in orders)
+    await asyncio.to_thread(_tg_send, body)
+
+
 # ---------------------------------------------------------------------------
 # Global IB instance
 # IB() must be created *inside* uvicorn's running loop (lifespan below),
@@ -107,92 +261,105 @@ ib: IB  # assigned in lifespan startup
 is_paper_account: bool = False   # set after connect; paper accounts use a test schedule
 
 # ---------------------------------------------------------------------------
-# Auto-close state
-# Live:  15:50 ET cancel all open orders; 15:55 ET close all positions at market.
-# Paper: 10:50 ET cancel all open orders; 10:55 ET close all positions at market (test mode).
+# Local fill log
 # ---------------------------------------------------------------------------
-autoclose_enabled: bool = True
-_cancel_orders_fired_date   = None   # tracks cancel-orders fire per calendar date
-_close_positions_fired_date = None   # tracks close-positions fire per calendar date
+# IB's reqExecutions API only returns *today's* fills (per the official docs:
+# "Only the current day's executions can be retrieved").  Opening fills from
+# previous days are therefore not retrievable through the API, which makes
+# overnight-trade detection impossible unless we keep our own record.
+#
+# To bridge this, every fill observed by the running app (via the live
+# execDetailsEvent) is appended to a JSON Lines file.  The overnight-trades
+# endpoint then merges the on-disk history with today's reqExecutions() result
+# and FIFO-matches them per (symbol, secType, currency).
+import threading
+_FILLS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fills.jsonl")
+_fills_lock = threading.Lock()
 
 
-async def _cancel_all_open_orders() -> list[dict]:
-    """Cancel every pending open order. Returns summary list."""
-    await ib.reqAllOpenOrdersAsync()
-    PENDING = {"PendingSubmit", "PendingCancel", "PreSubmitted", "Submitted"}
-    results = []
-    for t in ib.trades():
-        if t.orderStatus.status not in PENDING:
-            continue
-        ib.cancelOrder(t.order)
-        results.append({
-            "order_id": t.order.orderId,
-            "symbol":   t.contract.symbol,
-        })
-    if results:
-        await asyncio.sleep(1)
-    return results
+def _fut_to_dict(f) -> dict:
+    """Serialize a Fill to a JSON-safe dict for the local log file."""
+    ex = f.execution
+    c = f.contract
+    # Execution.time can be naive UTC; ensure we have an ISO string.
+    t = ex.time
+    t_iso = t.isoformat() if hasattr(t, "isoformat") else str(t)
+    return {
+        "exec_id":   ex.execId,
+        "time_utc":  t_iso,
+        "symbol":    c.symbol,
+        "sec_type":  c.secType,
+        "currency":  c.currency or "",
+        "exchange":  c.exchange or "",
+        "side":      ex.side or "",
+        "shares":    float(ex.shares),
+        "price":     float(ex.price),
+        "order_id":  ex.orderId,
+        "perm_id":   ex.permId,
+        "client_id": ex.clientId,
+    }
 
 
-async def _close_all_positions_market(max_deviation: Optional[float] = None) -> list[dict]:
-    """Close every open position with a market order. Returns summary list.
-
-    If max_deviation is set (e.g. 0.04 for 4%), only positions whose current
-    market price is within that fraction of the average cost are closed; the
-    rest are left untouched.
-    """
-    port = ib.portfolio()
-    results = []
-    for p in port:
-        if p.position == 0:
-            continue
-        if max_deviation is not None and p.averageCost:
-            dev = abs(p.marketPrice - p.averageCost) / p.averageCost
-            if dev > max_deviation:
-                continue
-        action = "SELL" if p.position > 0 else "BUY"
-        qty    = abs(p.position)
-        order  = MarketOrder(action, qty)
-        trade  = ib.placeOrder(p.contract, order)
-        results.append({
-            "symbol":   p.contract.symbol,
-            "action":   action,
-            "quantity": qty,
-            "order_id": trade.order.orderId,
-        })
-    if results:
-        await asyncio.sleep(1)
-    return results
+def _fill_to_dto(f):
+    """Rebuild a dict (used by FIFO matcher) from a JSON-recorded fill."""
+    return {
+        "exec_id":  f["exec_id"],
+        "time":     f["time_utc"],     # ISO string with tz
+        "symbol":   f["symbol"],
+        "sec_type": f["sec_type"],
+        "currency": f["currency"],
+        "side":     f["side"],
+        "shares":   f["shares"],
+        "price":    f["price"],
+    }
 
 
-async def _autoclose_loop():
-    """Background task: cancel all open orders then close all positions.
-
-    Live accounts:  15:50 ET cancel, 15:55 ET close positions.
-    Paper accounts: 10:50 ET cancel, 10:55 ET close positions (test mode).
-    """
-    global _cancel_orders_fired_date, _close_positions_fired_date
-    while True:
+def _record_fill(f):
+    """Append a live fill to the local JSONL file (idempotent by execId)."""
+    d = _fut_to_dict(f)
+    if not d["exec_id"]:
+        return
+    with _fills_lock:
+        existing = set()
         try:
-            await asyncio.sleep(10)
-        except asyncio.CancelledError:
-            return          # lifespan is shutting down — exit cleanly
-        if not autoclose_enabled:
-            continue
-        if not ib.isConnected():
-            continue
-        now   = datetime.now(tz=_EASTERN)
-        today = now.date()
-        cancel_hour,  cancel_minute  = (10, 50) if is_paper_account else (15, 50)
-        close_hour,   close_minute   = (10, 55) if is_paper_account else (15, 55)
-        # cancel all unexecuted orders
-        if now.hour == cancel_hour and now.minute == cancel_minute and _cancel_orders_fired_date != today:
-            _cancel_orders_fired_date = today
-            await _cancel_all_open_orders()
-        # close all positions at market
-        if now.hour == close_hour and now.minute == close_minute and _close_positions_fired_date != today:
-            _close_positions_fired_date = today
-            await _close_all_positions_market(max_deviation=0.04)
+            with open(_FILLS_FILE, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    try:
+                        existing.add(__import__("json").loads(line)["exec_id"])
+                    except Exception:
+                        pass
+        except FileNotFoundError:
+            pass
+        if d["exec_id"] in existing:
+            return
+        with open(_FILLS_FILE, "a", encoding="utf-8") as fh:
+            fh.write(__import__("json").dumps(d) + "\n")
+
+
+def _load_local_fills(days: int = 60) -> list:
+    """Return local fills as dto list, optionally filtered by lookback days."""
+    import json
+    cutoff = datetime.now(tz=_EASTERN) - timedelta(days=max(days or 0, 1))
+    out = []
+    try:
+        with open(_FILLS_FILE, "r", encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                try:
+                    t = datetime.fromisoformat(d["time_utc"])
+                    if t.tzinfo is None:
+                        t = t.replace(tzinfo=timezone.utc)
+                    if t.astimezone(_EASTERN) < cutoff:
+                        continue
+                except Exception:
+                    pass
+                out.append(_fill_to_dto(d))
+    except FileNotFoundError:
+        pass
+    return out
 
 
 @asynccontextmanager
@@ -205,14 +372,12 @@ async def lifespan(app: FastAPI):
     # Fix: register the already-running loop as the thread's current loop.
     asyncio.set_event_loop(asyncio.get_running_loop())
     ib = IB()
-    ac_task = asyncio.create_task(_autoclose_loop())
+    # Persist every live fill so overnight-trade matching works across days.
+    # IB's reqExecutions only returns same-day fills, so we must keep our own
+    # log of yesterday's opening fills to match against today's closing fills.
+    ib.execDetailsEvent += lambda trade, fill: _record_fill(fill)
     yield
     # ── Graceful shutdown ──────────────────────────────────────────────
-    ac_task.cancel()
-    try:
-        await asyncio.wait_for(ac_task, timeout=2.0)
-    except (asyncio.CancelledError, asyncio.TimeoutError):
-        pass
     try:
         if ib.isConnected():
             ib.disconnect()
@@ -540,47 +705,6 @@ async def positions():
         raise HTTPException(500, str(exc))
 
 
-# ---------------------------------------------------------------------------
-# Auto-close endpoints
-# ---------------------------------------------------------------------------
-
-class AutoCloseRequest(BaseModel):
-    enabled: bool
-
-
-@app.get("/api/autoclose")
-async def get_autoclose():
-    now = datetime.now(tz=_EASTERN)
-    return {
-        "autoclose_enabled":           autoclose_enabled,
-        "is_paper_account":            is_paper_account,
-        "server_time_eastern":         now.strftime("%H:%M:%S"),
-        "cancel_orders_time":          "10:50" if is_paper_account else "15:50",
-        "close_positions_time":        "10:55" if is_paper_account else "15:55",
-        "cancel_orders_fired_date":    str(_cancel_orders_fired_date)   if _cancel_orders_fired_date   else None,
-        "close_positions_fired_date":  str(_close_positions_fired_date) if _close_positions_fired_date else None,
-    }
-
-
-@app.post("/api/autoclose")
-async def set_autoclose(req: AutoCloseRequest):
-    global autoclose_enabled
-    autoclose_enabled = req.enabled
-    return {"autoclose_enabled": autoclose_enabled}
-
-
-@app.post("/api/autoclose/trigger")
-async def trigger_autoclose_now():
-    """Manually trigger an immediate market-close of all positions (for testing)."""
-    if not ib.isConnected():
-        raise HTTPException(400, "Not connected to IB")
-    try:
-        results = await _close_all_positions_market()
-        return {"closed": results}
-    except Exception as exc:
-        raise HTTPException(500, str(exc))
-
-
 @app.get("/api/orders")
 async def open_orders():
     if not ib.isConnected():
@@ -614,6 +738,225 @@ async def open_orders():
                 "remaining":  float(s.remaining),
             })
         return result
+    except Exception as exc:
+        raise HTTPException(500, str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Finished / overnight trades
+# ---------------------------------------------------------------------------
+# A trade is reported here when it was *not* finished within the same trading
+# day — i.e. the opening fill and the closing fill fall on different calendar
+# days, OR the closing fill lands after the regular session close (16:00 ET)
+# on the same day (after-hours / extended-hours close).
+
+# EOD auto-close leg activates at 15:55 ET (see _next_trading_day_1555_et).
+# A trade qualifies as "not finished within the day" when the close fill is on
+# a later date than the open, OR at/after the EOD close time (15:55 ET) on the
+# same date — i.e. closed by the bracket's EOD leg rather than intraday TP/SL.
+_MARKET_CLOSE_ET = (15, 55)
+
+
+def _aware_utc(dt: datetime) -> datetime:
+    """IB execution times may arrive naive; assume UTC then we can convert."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _to_eastern(dt: datetime) -> datetime:
+    return _aware_utc(dt).astimezone(_EASTERN)
+
+
+def _parse_iso(iso: str) -> datetime:
+    """Parse an ISO timestamp (possibly from JSON) into a tz-aware datetime."""
+    t = datetime.fromisoformat(iso)
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=timezone.utc)
+    return t
+
+
+def _fifo_match(fills: list) -> list:
+    """FIFO-match buys against sells per (symbol, secType, currency).
+
+    `fills` is a list of plain dicts with keys: exec_id, time (ISO str with tz),
+    symbol, sec_type, currency, side, shares, price.  Returns a list of closed
+    lots (dicts with open_time/close_time in ET, open_price, close_price, etc.).
+    """
+    groups: dict = {}
+    for f in fills:
+        key = (f["symbol"], f["sec_type"], f["currency"] or "")
+        groups.setdefault(key, []).append(f)
+
+    result = []
+    for (sym, sec, cur), fl in groups.items():
+        fl.sort(key=lambda x: _parse_iso(x["time"]))
+        long_q: deque = deque()    # each entry: [shares_left, open_time_et, open_price]
+        short_q: deque = deque()
+        for f in fl:
+            side = (f["side"] or "").upper()
+            # IB execution sides: BOT (bought), SLD (sold), SSHORT (short sell).
+            # "BOT" → buy (opens long / closes short); anything else → sell.
+            is_buy = side in ("BOT", "BUY")
+            shares = float(f["shares"])
+            close_et = _to_eastern(_parse_iso(f["time"]))
+            close_price = float(f["price"])
+            opposing = short_q if is_buy else long_q
+            own_side = "SHORT" if is_buy else "LONG"
+            while shares > 1e-9 and opposing:
+                lot = opposing[0]
+                lot_shares, lot_open_et, lot_open_price = lot[0], lot[1], lot[2]
+                matched = min(shares, lot_shares)
+                if is_buy:                     # closing a short
+                    pnl = (lot_open_price - close_price) * matched
+                else:                          # closing a long
+                    pnl = (close_price - lot_open_price) * matched
+                if (cur or "").upper() == "USD":
+                    pnl *= 7.8  # USD→HKD conversion used by open-orders / positions views
+                open_date = lot_open_et.date()
+                close_date = close_et.date()
+                qualifies = (
+                    close_date > open_date or
+                    (close_date == open_date and
+                     (close_et.hour, close_et.minute) >= _MARKET_CLOSE_ET)
+                )
+                if qualifies:
+                    result.append({
+                        "symbol":      sym,
+                        "sec_type":    sec,
+                        "currency":    cur,
+                        "side":        own_side,
+                        "shares":      float(round(matched, 6)),
+                        "open_time":   lot_open_et.isoformat(),
+                        "close_time":  close_et.isoformat(),
+                        "open_price":  lot_open_price,
+                        "close_price": close_price,
+                        "pnl":         float(round(pnl, 4)),
+                        "exec_id":     f.get("exec_id", ""),
+                    })
+                lot[0] -= matched
+                shares -= matched
+                if lot[0] <= 1e-9:
+                    opposing.popleft()
+            if shares > 1e-9:
+                target = long_q if is_buy else short_q
+                target.append([shares, close_et, close_price])
+    result.sort(key=lambda r: r["close_time"], reverse=True)
+    return result, groups
+
+
+@app.get("/api/overnight-trades")
+async def overnight_trades(days: int = 60):
+    """Finished trades that were held past the same-day session close.
+
+    IB's reqExecutions() only returns the current day's fills (per IB's official
+    docs: "Only the current day's executions can be retrieved").  Opening fills
+    from previous days are therefore loaded from the local JSONL log kept by
+    the running server (every live fill is appended to fills.jsonl).  We merge
+    the on-disk history with today's reqExecutions() result and FIFO-match
+    buys against sells per (symbol, secType, currency).
+
+    A closed lot qualifies as "overnight" when the close fill is on a later
+    date than the open, OR at/after 15:55 ET on the same date (the EOD close
+    leg of the bracket fires at 15:55 ET).
+    """
+    if not ib.isConnected():
+        raise HTTPException(400, "Not connected to IB")
+    try:
+        from ib_insync import ExecutionFilter
+
+        # 1. Local on-disk fills (preserves yesterday's opens across restarts).
+        local_fills = _load_local_fills(days=days)
+
+        # 2. Today's fills from IB (the only fills the API will return).
+        today_raw = await ib.reqExecutionsAsync(ExecutionFilter())
+        today_dtos = []
+        for f in list(today_raw) + list(ib.fills()):
+            ex = f.execution
+            c = f.contract
+            today_dtos.append({
+                "exec_id":  ex.execId,
+                "time":     _to_eastern(ex.time).isoformat(),
+                "symbol":   c.symbol,
+                "sec_type": c.secType,
+                "currency": c.currency or "",
+                "side":     ex.side or "",
+                "shares":   float(ex.shares),
+                "price":    float(ex.price),
+            })
+
+        # 3. Merge by execId (preferring today's authoritative version).
+        seen = set()
+        merged = []
+        for d in today_dtos + local_fills:
+            eid = d.get("exec_id") or ""
+            if eid and eid in seen:
+                continue
+            if eid:
+                seen.add(eid)
+            merged.append(d)
+
+        # Also record today's fills to disk so they survive a restart later.
+        for f in list(today_raw) + list(ib.fills()):
+            _record_fill(f)
+
+        cutoff = datetime.now(tz=_EASTERN) - timedelta(days=max(days or 0, 1))
+        merged = [d for d in merged
+                  if _to_eastern(_parse_iso(d["time"])) >= cutoff]
+
+        result, groups = _fifo_match(merged)
+        debug = (
+            f"{len(local_fills)} local + {len(today_dtos)} today "
+            f"= {len(merged)} fills, {len(groups)} groups, {len(result)} overnight"
+        )
+        return {"ok": True, "trades": result, "debug": debug}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, str(exc))
+
+
+@app.get("/api/overnight-trades/debug")
+async def overnight_trades_debug(days: int = 60):
+    """Dump raw fills (from local log + today's reqExecutions) for inspection."""
+    if not ib.isConnected():
+        raise HTTPException(400, "Not connected to IB")
+    try:
+        from ib_insync import ExecutionFilter
+        local_fills = _load_local_fills(days=days)
+        today_raw = await ib.reqExecutionsAsync(ExecutionFilter())
+        today_dtos = []
+        for f in list(today_raw) + list(ib.fills()):
+            ex = f.execution
+            c = f.contract
+            today_dtos.append({
+                "exec_id":  ex.execId,
+                "time":     _to_eastern(ex.time).isoformat(),
+                "symbol":   c.symbol,
+                "sec_type": c.secType,
+                "currency": c.currency or "",
+                "side":     ex.side or "",
+                "shares":   float(ex.shares),
+                "price":    float(ex.price),
+                "order_id": ex.orderId,
+            })
+        seen = set()
+        merged = []
+        for d in today_dtos + local_fills:
+            eid = d.get("exec_id") or ""
+            if eid and eid in seen:
+                continue
+            if eid:
+                seen.add(eid)
+            merged.append(d)
+        return {
+            "ok": True,
+            "fills": merged,
+            "count": len(merged),
+            "local_count": len(local_fills),
+            "today_count": len(today_dtos),
+            "file": _FILLS_FILE,
+        }
     except Exception as exc:
         raise HTTPException(500, str(exc))
 
