@@ -656,10 +656,10 @@ function overlayClose(e, id) { if (e.target.classList.contains('overlay')) close
 
 /* ── Connection ──────────────────────────────────────────────────────── */
 const CONN_CANDIDATES = [
-  { host: '127.0.0.1', port: 4002, label: 'Paper IB Gateway' },
-  { host: '127.0.0.1', port: 7497, label: 'Paper IB TWS' },
   { host: '127.0.0.1', port: 4001, label: 'Live IB Gateway' },
+  { host: '127.0.0.1', port: 4002, label: 'Paper IB Gateway' },
   { host: '127.0.0.1', port: 7496, label: 'Live IB TWS' },
+  { host: '127.0.0.1', port: 7497, label: 'Paper IB TWS' },
 ];
 
 async function tryConnectList(candidates) {
