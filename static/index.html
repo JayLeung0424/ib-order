@@ -286,6 +286,7 @@
     #f-tbl tbody td { padding: 7px 10px; }
     #f-tbl tbody td:last-child { text-align: right; }
     #f-order-all { padding: 4px; }
+    #f-order-side { font-size: 10px; padding: 2px 3px; margin-right: 4px; background: var(--bg3); color: var(--text); border: 1px solid var(--border); border-radius: var(--r); }
     .f-spin { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--border); border-top-color: var(--blue); border-radius: 50%; animation: blink 1s linear infinite; vertical-align: -2px; margin-right: 5px; }
   </style>
 </head>
@@ -385,6 +386,37 @@
             <span style="color:var(--text)">BUY/SELL&nbsp; SYMBOL&nbsp; ENTRY&nbsp; TP&nbsp; SL</span>
             &nbsp;or add qty:&nbsp;
             <span style="color:var(--text)">BUY&nbsp; SYMBOL&nbsp; QTY&nbsp; ENTRY&nbsp; TP&nbsp; SL</span>
+          </div>
+        </div>
+
+        <hr class="sep" />
+
+        <!-- CSV import ───────────────────────────────────────── -->
+        <div class="fg">
+          <label>CSV Import</label>
+          <input id="o-csvfile" type="file" accept=".csv,text/csv" style="font-size:11px"
+                 onchange="csvLoad(this)" />
+          <div style="font-size:10px;color:var(--muted);margin-top:4px;line-height:1.7">
+            Columns: <span style="color:var(--text)">ticker, action(做多/做空 or side 1/-1), shares, entry, tp, sl</span>
+          </div>
+        </div>
+
+        <div id="csv-preview" style="display:none">
+          <div class="tbl-wrap" style="max-height:240px;border:1px solid var(--line);border-radius:6px">
+            <table>
+              <thead>
+                <tr>
+                  <th>Symbol</th><th>Side</th><th class="tr">Qty</th>
+                  <th class="tr">Entry</th><th class="tr">TP</th><th class="tr">SL</th>
+                </tr>
+              </thead>
+              <tbody id="csv-tbody"></tbody>
+            </table>
+          </div>
+          <div id="csv-msg" style="font-size:11px;color:var(--muted);margin-top:4px"></div>
+          <div class="action-btns">
+            <button class="btn-buy"  onclick="csvPlace()" style="flex:1">Place All <span id="csv-count"></span></button>
+            <button class="btn-sell" onclick="csvReset()" style="flex:0 0 auto">Clear</button>
           </div>
         </div>
 
@@ -505,17 +537,17 @@
     <!-- ── Data panel (tabs) ─────────────────────────────────── -->
     <div class="panel">
       <div class="tabs">
-        <button class="tab active" id="tb-pos" onclick="showTab('pos')">
+        <button class="tab" id="tb-pos" onclick="showTab('pos')">
           Positions&nbsp;<span id="cnt-pos" class="c-mut"></span>
         </button>
         <button class="tab" id="tb-ord" onclick="showTab('ord')">
           Open Orders&nbsp;<span id="cnt-ord" class="c-mut"></span>
         </button>
-        <button class="tab" id="tb-futu" onclick="showTab('futu')">Futu</button>
+        <button class="tab active" id="tb-futu" onclick="showTab('futu')">Futu</button>
       </div>
 
       <!-- Positions -->
-      <div id="tp-pos" class="tab-pane active">
+      <div id="tp-pos" class="tab-pane">
         <div class="tbl-wrap">
           <table>
             <thead>
@@ -565,7 +597,7 @@
       </div>
 
       <!-- Futu Stock List -->
-      <div id="tp-futu" class="tab-pane">
+      <div id="tp-futu" class="tab-pane active">
         <div class="futu-wrap">
           <div class="futu-add">
             <h2>Futu <span class="badge b-sub">TOP LIST</span></h2>
@@ -574,7 +606,7 @@
             <label>ADD US.</label>
             <input id="f-add" class="mono" type="text" placeholder="e.g. FSLR TWLO NTRA NET" />
             <button class="btn-blue" id="f-add-btn">Add</button>
-            <button class="btn" id="f-vol300" title="From web-production-92b9c.up.railway.app">Fetch Vol300</button>
+            <button class="btn" id="f-vol300" title="From localhost:5001/api/vol8020-top">Fetch TOP10</button>
             <span id="f-add-status" class="c-mut"></span>
           </div>
 
@@ -590,7 +622,7 @@
                 <th data-k="prev_volume">前一天成交量<span class="arr">▾</span></th>
                 <th class="f-sep" data-k="today_open">今日開市<span class="arr">▾</span></th>
                 <th>漲跌</th>
-                <th class="f-sep" id="f-order-all" style="text-align:right"><button class="btn-blue" style="padding:4px 10px;font-size:11px;pointer-events:none">ORDER ALL</button></th>
+                <th class="f-sep" id="f-order-all" style="text-align:right"><select id="f-order-side"><option value="both" selected>Both</option><option value="long">Long</option><option value="short">Short</option></select><button class="btn-blue" style="padding:4px 10px;font-size:11px;pointer-events:none">ORDER ALL</button></th>
               </tr></thead>
               <tbody></tbody>
             </table>
@@ -711,6 +743,7 @@ function setConnUI(on, info = '') {
   document.getElementById('btn-dis').style.display   = on ? '' : 'none';
   const fOrderAllBtn = document.querySelector('#f-order-all > button');
   if (fOrderAllBtn) fOrderAllBtn.disabled = !on;
+  if (!on) fStopQuotePoll();
   if (fLoaded) fRender();
 }
 
@@ -770,10 +803,12 @@ function toggleAuto() {
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
     stopPoll();
+    fStopQuotePoll();
   } else if (connected && autoOn) {
     refreshAll();        // immediate catch-up refresh
     refreshPositions();
     startPoll();
+    if (fLoaded) { fRefreshQuotes(); fStartQuotePoll(); }
   }
 });
 
@@ -1039,7 +1074,7 @@ function frmUpdate() {
 async function placeOrder(action) {
   const sec = document.getElementById('o-sec').value;
   const ot  = document.getElementById('o-type').value;
-  const sym = document.getElementById('o-sym').value.trim().toUpperCase();
+  const sym = _normSymbol(document.getElementById('o-sym').value, sec);
   const qty = parseFloat(document.getElementById('o-qty').value);
 
   if (!sym) { toast('Symbol is required', 'err'); return; }
@@ -1106,6 +1141,14 @@ function _splitOrderGroups(tokens) {
   return groups;
 }
 
+/* IB API class-share symbols use a space (BRK B / BF B), not a hyphen (BRK-B).
+   A hyphen form returns "No security definition found". */
+function _normSymbol(sym, secType) {
+  sym = (sym || '').trim();
+  if ((secType || 'STK').toUpperCase() === 'STK') sym = sym.replace(/-/g, ' ');
+  return sym.replace(/\s+/g, ' ').trim();
+}
+
 async function quickPlace() {
   const raw = document.getElementById('o-quick').value.trim();
   if (!raw) return;
@@ -1139,6 +1182,8 @@ async function quickPlace() {
     if (!symbol)                                 { toast('Symbol required', 'err'); return; }
     if (isNaN(entry) || isNaN(tp) || isNaN(sl)) { toast('Entry, TP and SL must be numbers', 'err'); return; }
     if (isNaN(qty) || qty <= 0)                 { toast('Quantity must be > 0', 'err'); return; }
+
+    symbol = _normSymbol(symbol, document.getElementById('o-sec').value);
 
     orders.push({
       action, symbol, qty, entry, tp, sl,
@@ -1186,6 +1231,78 @@ async function quickPlace() {
   errors.forEach(msg => toast(`Order failed — ${msg}`, 'err'));
 
   if (errors.length === 0) document.getElementById('o-quick').value = '';
+  await refreshAll();
+  showTab('ord');
+}
+
+/* ── CSV import ──────────────────────────────────────────────────────── */
+// Strategy-export files (ticker, action, shares, entry, tp, sl, ...).
+// Parsing/validation happens server-side via /api/orders/csv; we preview the
+// parsed rows (dry_run) and only send live orders after explicit confirmation.
+let _csvText = '';
+
+function csvReset() {
+  _csvText = '';
+  document.getElementById('o-csvfile').value = '';
+  document.getElementById('csv-preview').style.display = 'none';
+}
+
+async function csvLoad(input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  const text = await file.text();
+  let r;
+  try {
+    r = await api('POST', '/api/orders/csv', { csv: text, dry_run: true });
+  } catch (e) {
+    toast(`CSV import failed: ${e.message}`, 'err');
+    csvReset();
+    return;
+  }
+  _csvText = text;
+
+  const tbody = document.getElementById('csv-tbody');
+  const badge = a => a === 'BUY' ? 'badge b-buy' : 'badge b-sell';
+  tbody.innerHTML = (r.orders || []).map(o => `
+    <tr>
+      <td class="mono"><strong>${esc(o.symbol)}</strong></td>
+      <td><span class="${badge(o.action)}">${o.action}</span></td>
+      <td class="tr mono">${o.shares}</td>
+      <td class="tr mono">${fmt(o.entry)}</td>
+      <td class="tr mono">${fmt(o.tp)}</td>
+      <td class="tr mono">${fmt(o.sl)}</td>
+    </tr>`).join('');
+
+  const msg = document.getElementById('csv-msg');
+  const parts = [];
+  if (r.orders && r.orders.length) parts.push(`${r.orders.length} order(s) ready`);
+  if (r.errors && r.errors.length) {
+    parts.push(`${r.errors.length} row(s) skipped:`);
+    parts.push(r.errors.map(esc).join('<br>'));
+  }
+  msg.innerHTML = parts.join(' ');
+  document.getElementById('csv-count').textContent = `(${(r.orders || []).length})`;
+  document.getElementById('csv-preview').style.display = r.orders && r.orders.length ? '' : 'none';
+
+  if (!r.orders || !r.orders.length) {
+    toast('No valid orders found in CSV', 'err');
+  }
+}
+
+async function csvPlace() {
+  if (!_csvText) return;
+  if (!confirm(`Place all CSV orders?`)) return;
+  let r;
+  try {
+    r = await api('POST', '/api/orders/csv', { csv: _csvText, dry_run: false });
+  } catch (e) {
+    toast(`CSV import failed: ${e.message}`, 'err');
+    return;
+  }
+  if (r.placed > 0) toast(`Placed ${r.placed}/${r.count} order(s) from CSV`, 'ok');
+  (r.errors || []).forEach(msg => toast(`CSV skipped — ${msg}`, 'err'));
+  (r.results || []).filter(x => !x.ok).forEach(x => toast(`${x.symbol}: ${x.error}`, 'err'));
+  csvReset();
   await refreshAll();
   showTab('ord');
 }
@@ -1306,10 +1423,44 @@ async function fLoad() {
     fData = j.stocks || [];
     s.textContent = fData.length ? `${fData.length} stocks · 按輸入順序` : '';
     fRender();
+    fStartQuotePoll();
   } catch(e) {
     s.innerHTML='';
     document.querySelector('#f-tbl tbody').innerHTML = `<tr><td colspan=10 class="empty">${esc(e)}</td></tr>`;
   }
+}
+
+/* ── Futu quote auto-refresh (every 3 s, snapshot only) ──────────────── */
+const FUTU_QUOTE_INTERVAL = 3000;
+let fQuoteTimer = null, fQuoteBusy = false;
+
+async function fRefreshQuotes() {
+  if (document.hidden || fQuoteBusy) return;
+  fQuoteBusy = true;
+  try {
+    const r = await fetch('/api/stocks/quotes?group=' + encodeURIComponent(FUTU_GROUP));
+    const j = await r.json();
+    if (j.ok && Array.isArray(j.quotes)) {
+      const qMap = new Map(j.quotes.map(q => [String(q.code).toUpperCase(), q.today_open]));
+      let changed = false;
+      for (const row of fData) {
+        const v = qMap.get(String(row.code).toUpperCase());
+        if (v !== undefined && v !== null && v !== row.today_open) {
+          row.today_open = v;
+          changed = true;
+        }
+      }
+      if (changed) fRender();
+    }
+  } catch(e) { /* silent — next tick retries */ }
+  fQuoteBusy = false;
+}
+
+function fStartQuotePoll() {
+  if (!fQuoteTimer) fQuoteTimer = setInterval(fRefreshQuotes, FUTU_QUOTE_INTERVAL);
+}
+function fStopQuotePoll() {
+  clearInterval(fQuoteTimer); fQuoteTimer = null;
 }
 
 function fRender() {
@@ -1370,20 +1521,63 @@ async function fOrder(symbol, todayOpen) {
   const quick = document.getElementById('o-quick');
   quick.value = 'Loading...';
   try {
-    const r = await fetch('https://web-production-92b9c.up.railway.app/api/predict-stock', {
+    const r = await fetch(PREDICT_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ symbol, manual_input: String(todayOpen ?? '') }),
     });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
     const j = await r.json();
-    const copy = j?.auto_pos_copy?.copy ?? '';
-    quick.value = copy;
-    toast(`Fetched ${symbol}: ${copy || '(empty)'}`, 'ok');
-    if (copy) quickPlace();
+    const strat = j?.simple_strategy;
+    if (!strat) throw new Error('no simple_strategy');
+    const sides = [
+      ['BUY',  strat.long_order],
+      ...(strat.entry_both_side !== false ? [['SELL', strat.short_order]] : []),
+    ];
+    let placed = 0;
+    for (const [action, orderStr] of sides) {
+      const parsed = _parseOrderStr(orderStr);
+      if (!parsed) throw new Error(`bad ${action} order string: ${orderStr}`);
+      // Server order string is authoritative — use action/qty/entry/tp/sl as-is
+      await api('POST', '/api/orders', _fBracketBody(symbol, parsed.action, parsed.entry, parsed.sl, parsed.tp, parsed.qty));
+      placed++;
+    }
+    quick.value = '';
+    toast(`Order placed: ${symbol} (${placed})`, 'ok');
   } catch(e) {
     quick.value = '';
-    toast(`Futu predict failed: ${e.message}`, 'err');
+    toast(`${symbol}: ${e.message}`, 'err');
   }
+}
+
+const PREDICT_URL = 'http://localhost:5001/api/predict-stock';
+const ORDER_CAPITAL = 500000;
+
+function _fBracketBody(symbol, action, entry, sl, tp, qty) {
+  return {
+    symbol: _normSymbol(symbol, 'STK'),
+    sec_type: 'STK',
+    exchange: 'SMART',
+    currency: 'USD',
+    action,
+    quantity: qty,
+    order_type: 'bracket',
+    entry_price: entry,
+    take_profit: tp,
+    stop_loss: sl,
+  };
+}
+
+// Parse "BUY 65 98.8 100.09 97.03" (ACTION QTY ENTRY TP SL) from
+// simple_strategy.long_order / short_order and use it as-is for ordering.
+function _parseOrderStr(s) {
+  const parts = String(s || '').trim().toUpperCase().split(/\s+/);
+  if (parts.length !== 5) return null;
+  const [action, qty, entry, tp, sl] = parts;
+  if (action !== 'BUY' && action !== 'SELL') return null;
+  const q = parseFloat(qty), e = parseFloat(entry), t = parseFloat(tp), l = parseFloat(sl);
+  if (![q, e, t, l].every(isFinite) || q <= 0) return null;
+  return { action, qty: q, entry: e, tp: t, sl: l };
 }
 
 async function fOrderAll() {
@@ -1391,17 +1585,45 @@ async function fOrderAll() {
   if (!fRenderedRows.length) { toast('No rows to order', 'info'); return; }
   const posSyms = new Set(_lastPositions.map(p => String(p.symbol).toUpperCase()));
   const ordSyms = new Set(_lastOrders.map(o => String(o.symbol).toUpperCase()));
+  const side = document.getElementById('f-order-side').value; // 'long' | 'short' | 'both'
   const toOrder = fRenderedRows.filter(r => {
     const code = (r.code ?? '').replace(/^US\./, '').toUpperCase();
     return !posSyms.has(code) && !ordSyms.has(code);
   });
   if (!toOrder.length) { toast('All rows already held or ordered', 'info'); return; }
   if (!confirm(`Order ${toOrder.length} of ${fRenderedRows.length} stocks? (${fRenderedRows.length - toOrder.length} held/ordered)`)) return;
+
+  let placed = 0, failed = 0;
   for (const r of toOrder) {
     const code = (r.code ?? '').replace(/^US\./, '');
-    const todayOpen = r.today_open ?? '';
-    await fOrder(code, todayOpen);
+    try {
+      const rr = await fetch(PREDICT_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol: code, manual_input: String(r.today_open ?? '') }),
+      });
+      if (!rr.ok) throw new Error('HTTP ' + rr.status);
+      const j = await rr.json();
+      const strat = j?.simple_strategy;
+      if (!strat) throw new Error('no simple_strategy');
+      const both = side === 'both' ? strat.entry_both_side !== false : false;
+      const sides = side === 'short' ? [['SELL', strat.short_order]]
+        : side === 'long' ? [['BUY', strat.long_order]]
+        : [
+          ['BUY',  strat.long_order],
+          ...(both ? [['SELL', strat.short_order]] : []),
+        ];
+      for (const [action, orderStr] of sides) {
+        const parsed = _parseOrderStr(orderStr);
+        if (!parsed) throw new Error(`bad ${action} order string: ${orderStr}`);
+        // Server order string is authoritative — use action/qty/entry/tp/sl as-is
+        await api('POST', '/api/orders', _fBracketBody(code, parsed.action, parsed.entry, parsed.sl, parsed.tp, parsed.qty));
+        placed++;
+      }
+    } catch(e) { failed++; toast(`${code}: ${e.message}`, 'err'); }
   }
+  toast(`ORDER ALL done: ${placed} orders placed, ${failed} failed`, placed ? 'ok' : 'err');
+  await refreshAll();
 }
 
 async function fAdd() {
@@ -1427,10 +1649,10 @@ async function fFetchVol300() {
   const st = document.getElementById('f-add-status');
   st.className = 'c-mut'; st.innerHTML = '<span class="f-spin"></span>Fetching list...';
   try {
-    const r = await fetch('https://web-production-92b9c.up.railway.app/api/vol300-copy-symbols');
+    const r = await fetch('http://localhost:5001/api/vol8020-top');
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const j = await r.json();
-    const list = (j.list || []).map(s => String(s).toUpperCase()).filter(Boolean);
+    const list = (j.items || []).map(s => String(s.symbol || s).toUpperCase()).filter(Boolean);
     if (!list.length) { st.className = 'c-red'; st.textContent = 'Empty list from server'; return; }
     document.getElementById('f-add').value = list.join(' ');
     st.className = 'c-mut'; st.innerHTML = '<span class="f-spin"></span>Adding ' + list.length + ' stocks...';
@@ -1469,6 +1691,8 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('tb-futu').addEventListener('click', () => {
     if (!fLoaded) { fLoaded = true; fLoad(); }
   });
+  // Futu is the default tab — trigger the first load immediately
+  if (!fLoaded) { fLoaded = true; fLoad(); }
 });
 </script>
 </body>

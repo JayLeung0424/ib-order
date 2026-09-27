@@ -511,6 +511,39 @@ async def api_stocks(request: Request):
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
 
 
+def _futu_get_quotes(group_name: str = FUTU_GROUP) -> dict:
+    """Lightweight: snapshot only (today open / last price), no history klines."""
+    from futu import OpenQuoteContext, RET_OK
+
+    quote_ctx = OpenQuoteContext(host=FUTU_QUOTE_HOST, port=FUTU_QUOTE_PORT)
+    try:
+        ret, data = quote_ctx.get_user_security(group_name)
+        if ret != RET_OK:
+            return {"ok": False, "error": str(data)}
+        codes = data["code"].tolist() if hasattr(data, "columns") and "code" in data.columns else []
+        quotes = []
+        if codes:
+            ret_s, snap = quote_ctx.get_market_snapshot(codes)
+            if ret_s == RET_OK and hasattr(snap, "to_dict"):
+                for r in snap.to_dict(orient="records"):
+                    today_open = r.get("open_price")
+                    if today_open is None or float(today_open) == 0:
+                        today_open = r.get("last_price")
+                    quotes.append({"code": r.get("code"), "today_open": today_open})
+        return {"ok": True, "quotes": quotes}
+    finally:
+        quote_ctx.close()
+
+
+@app.get("/api/stocks/quotes")
+async def api_stock_quotes(request: Request):
+    group = request.query_params.get("group", FUTU_GROUP)
+    try:
+        return await asyncio.to_thread(_futu_get_quotes, group)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+
+
 class FutuAddRequest(BaseModel):
     code: str
 
@@ -564,13 +597,20 @@ class ModifyRequest(BaseModel):
     quantity: Optional[float] = None
 
 
+class CsvImportRequest(BaseModel):
+    csv: str
+    dry_run: bool = False
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
 def _build_contract(req: OrderRequest):
     st = req.sec_type.upper()
-    sym = req.symbol.upper()
+    # IB API class-share symbols use a space (BRK B), not a hyphen (BRK-B);
+    # the hyphen form returns "No security definition found".
+    sym = req.symbol.upper().replace("-", " ") if st == "STK" else req.symbol.upper()
     if st == "STK":
         return Stock(sym, req.exchange, req.currency)
     if st == "OPT":
@@ -1082,6 +1122,177 @@ async def place_order(req: OrderRequest):
         raise
     except Exception as exc:
         raise HTTPException(500, str(exc))
+
+
+# ---------------------------------------------------------------------------
+# CSV import (export-file -> bracket orders)
+# ---------------------------------------------------------------------------
+# Supports strategy-export files shaped like:
+#     ticker,side,action,shares,entry,tp,sl,notional_usd,weight,score,...
+#     BRK-B,-1,做空,15,512.77,509.20,518.63,...
+# `action` 做多/long/buy → BUY, 做空/short/sell → SELL  (or `side`: 1=BUY, -1=SELL).
+# Extra columns are ignored.  Each valid row becomes a bracket order.
+
+_CSV_ALIASES = {
+    "ticker": "ticker", "symbol": "ticker",
+    "action": "action", "side": "side",
+    "shares": "shares", "qty": "shares", "quantity": "shares",
+    "entry": "entry", "entry_price": "entry",
+    "tp": "tp", "take_profit": "tp",
+    "sl": "sl", "stop_loss": "sl",
+    "notional_usd": "notional_usd", "weight": "weight", "score": "score",
+}
+
+
+def _csv_action(action: str, side: str) -> Optional[str]:
+    a = (action or "").strip().lower()
+    s = (side or "").strip().lower()
+
+    def norm(v: str) -> Optional[str]:
+        if v in ("做多", "long", "buy", "b"):
+            return "BUY"
+        if v in ("做空", "short", "sell", "s"):
+            return "SELL"
+        if v in ("1", "+1"):
+            return "BUY"
+        if v == "-1":
+            return "SELL"
+        return None
+
+    return norm(a) or norm(s)
+
+
+def _parse_orders_csv(text: str):
+    """Parse strategy-export CSV text into bracket-order rows.
+
+    Returns (orders, errors).  `orders` is a list of dicts with keys
+    symbol / action / shares / entry / tp / sl / notional_usd; `errors` is a
+    list of "line N: message" strings for skipped rows.
+    """
+    import csv as _csv
+    import io as _io
+
+    errors: list = []
+    orders: list = []
+
+    text = text.lstrip("\ufeff")
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return [], ["File is empty"]
+
+    # Light delimiter sniff (comma by default; tab/semicolon supported).
+    header_line = lines[0]
+    delim = ","
+    if header_line.count("\t") > header_line.count(","):
+        delim = "\t"
+    elif header_line.count(";") > header_line.count(","):
+        delim = ";"
+
+    reader = _csv.reader(_io.StringIO("\n".join(lines)), delimiter=delim)
+    try:
+        header = next(reader)
+    except StopIteration:
+        return [], ["Missing header row"]
+
+    colmap: dict = {}   # column index -> canonical name
+    for i, raw in enumerate(header):
+        canon = _CSV_ALIASES.get((raw or "").strip().lstrip("\ufeff").lower())
+        if canon and canon not in colmap:
+            colmap[i] = canon
+
+    required = {"ticker", "shares", "entry", "tp", "sl"}
+    missing = required - set(colmap.values())
+    if missing:
+        return [], ["Missing required columns: " + ", ".join(sorted(missing)) +
+                    (" (need action or side)" if "action" not in colmap.values() and
+                     "side" not in colmap.values() else "")]
+
+    def get(row, name):
+        for i, canon in colmap.items():
+            if canon == name and i < len(row):
+                return (row[i] or "").strip()
+        return ""
+
+    def num(v):
+        v = (v or "").replace(",", "").strip()
+        if not v:
+            return None
+        try:
+            return float(v)
+        except ValueError:
+            return None
+
+    for lineno, row in enumerate(reader, start=2):
+        if not row or all(not c.strip() for c in row):
+            continue
+        ticker = get(row, "ticker").upper()
+        if not ticker:
+            errors.append(f"line {lineno}: missing ticker")
+            continue
+        action = _csv_action(get(row, "action"), get(row, "side"))
+        if not action:
+            errors.append(f"line {lineno}: {ticker} — unknown action/side "
+                          f"'{get(row, 'action')}' / '{get(row, 'side')}'")
+            continue
+        shares = num(get(row, "shares"))
+        entry  = num(get(row, "entry"))
+        tp     = num(get(row, "tp"))
+        sl     = num(get(row, "sl"))
+        if shares is None or shares <= 0:
+            errors.append(f"line {lineno}: {ticker} — invalid shares '{get(row, 'shares')}'")
+            continue
+        for nm, v in (("entry", entry), ("tp", tp), ("sl", sl)):
+            if v is None or v <= 0:
+                errors.append(f"line {lineno}: {ticker} — invalid {nm} price")
+                break
+        else:
+            # Direction sanity: short (SELL) → TP below entry, SL above;
+            # long (BUY) → the mirror.  A reversed bracket would fire instantly.
+            ok = (tp < entry < sl) if action == "SELL" else (sl < entry < tp)
+            if not ok:
+                errors.append(f"line {lineno}: {ticker} — TP/SL on wrong side of "
+                              f"entry for {action} (entry={entry}, tp={tp}, sl={sl})")
+                continue
+            orders.append({
+                "symbol":        ticker,
+                "action":        action,
+                "shares":        int(shares) if float(shares).is_integer() else shares,
+                "entry":         round(entry, 2),
+                "tp":            round(tp, 2),
+                "sl":            round(sl, 2),
+                "notional_usd":  num(get(row, "notional_usd")),
+            })
+    return orders, errors
+
+
+@app.post("/api/orders/csv")
+async def import_orders_csv(req: CsvImportRequest):
+    """Import a CSV export file and place one bracket order per valid row.
+
+    Set dry_run=true to parse/validate only (used by the UI preview).
+    """
+    orders, errors = _parse_orders_csv(req.csv)
+    if req.dry_run:
+        return {"ok": True, "dry_run": True, "orders": orders, "errors": errors}
+    if not ib.isConnected():
+        raise HTTPException(400, "Not connected to IB")
+    results = []
+    for r in orders:
+        try:
+            order_req = OrderRequest(
+                symbol=r["symbol"], sec_type="STK", exchange="SMART", currency="USD",
+                action=r["action"], quantity=r["shares"], order_type="bracket",
+                entry_price=r["entry"], take_profit=r["tp"], stop_loss=r["sl"],
+            )
+            res = await place_order(order_req)
+            results.append({"symbol": r["symbol"], "ok": True, "orders": res})
+        except HTTPException as exc:
+            results.append({"symbol": r["symbol"], "ok": False, "error": exc.detail})
+        except Exception as exc:
+            results.append({"symbol": r["symbol"], "ok": False, "error": str(exc)})
+    placed = sum(1 for x in results if x["ok"])
+    return {"ok": True, "dry_run": False, "count": len(orders),
+            "placed": placed, "results": results, "errors": errors}
 
 
 @app.delete("/api/orders/{order_id}")
