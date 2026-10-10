@@ -607,6 +607,7 @@
             <input id="f-add" class="mono" type="text" placeholder="e.g. FSLR TWLO NTRA NET" />
             <button class="btn-blue" id="f-add-btn">Add</button>
             <button class="btn" id="f-vol300" title="From localhost:5001/api/vol8020-top">Fetch TOP10</button>
+            <button class="btn" id="f-copy" title="Copy symbols, space separated">⧉ Copy</button>
             <span id="f-add-status" class="c-mut"></span>
           </div>
 
@@ -1660,8 +1661,33 @@ async function fFetchVol300() {
   } catch(e) { st.className = 'c-red'; st.textContent = 'Fetch failed: ' + e; }
 }
 
+function fCopy() {
+  // Copy symbols (US. prefix stripped) of the currently rendered rows in
+  // their on-screen (sort) order, space separated: "TSLA APP PLTR"
+  const syms = fRenderedRows.map(r => String(r.code ?? '').replace(/^US\./, '')).filter(Boolean);
+  if (!syms.length) { toast('No stocks to copy', 'info'); return; }
+  const text = syms.join(' ');
+  const done = () => toast(`Copied ${syms.length} symbols: ${text}`, 'ok');
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(done).catch(() => _copyFallback(text, done));
+  } else {
+    _copyFallback(text, done);
+  }
+}
+function _copyFallback(text, done) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.cssText = 'position:fixed;top:-999px;left:-999px';
+  document.body.appendChild(ta);
+  ta.focus(); ta.select();
+  try { document.execCommand('paste'); } catch(e) { try { document.execCommand('copy'); } catch(e2) {} }
+  ta.remove();
+  done();
+}
+
 function fInit() {
   document.getElementById('f-add-btn').onclick = fAdd;
+  document.getElementById('f-copy').onclick = fCopy;
   document.getElementById('f-add').addEventListener('keydown', e => { if (e.key === 'Enter') fAdd(); });
   document.getElementById('f-vol300').onclick = fFetchVol300;
   document.getElementById('f-order-all').onclick = fOrderAll;
@@ -1679,8 +1705,7 @@ function fInit() {
 /* ── Init ────────────────────────────────────────────────────────────── */
 document.addEventListener('DOMContentLoaded', () => {
   frmUpdate();
-  fInit();
-  // Auto-refresh is on by default — reflect in UI immediately
+  fInit();  // Auto-refresh is on by default — reflect in UI immediately
   document.getElementById('sw').classList.toggle('on', autoOn);
   // Sync connection state; auto-connect using fallback sequence if not already connected
   fetch('/api/status').then(r => r.json()).then(d => {
