@@ -606,7 +606,7 @@
             <label>ADD US.</label>
             <input id="f-add" class="mono" type="text" placeholder="e.g. FSLR TWLO NTRA NET" />
             <button class="btn-blue" id="f-add-btn">Add</button>
-            <button class="btn" id="f-vol300" title="From localhost:5001/api/vol8020-top">Fetch TOP10</button>
+            <button class="btn" id="f-vol300" title="From localhost:5001/api/vol8020-top">Fetch TOP</button>
             <button class="btn" id="f-copy" title="Copy symbols, space separated">⧉ Copy</button>
             <span id="f-add-status" class="c-mut"></span>
           </div>
@@ -1495,16 +1495,21 @@ function fRender() {
     const chgStr = chg === null ? '' : `<span class="f-chg ${chg>=0?'c-grn':'c-red'}">${chg>=0?'+':''}${chg.toFixed(2)}%</span>`;
     const cls = chg === null ? 'c-mut' : (chg >= 0 ? 'c-grn' : 'c-red');
     const todayOpen = r.today_open ?? '';
-    const orderBtn = !connected
-      ? `<button class="btn-blue" style="padding:4px 10px;font-size:11px;opacity:.5;cursor:not-allowed" disabled>Order</button>`
-      : held
-        ? `<button class="btn" style="padding:4px 10px;font-size:11px;opacity:.5;cursor:not-allowed" disabled>Held</button>`
-        : ordered
-          ? `<button class="btn" style="padding:4px 10px;font-size:11px;opacity:.5;cursor:not-allowed" disabled>Ordered</button>`
-          : `<button class="btn-blue" style="padding:4px 10px;font-size:11px" onclick="fOrder('${esc(code)}','${esc(todayOpen)}')">Order</button>`;
+    const earnBadge = r.earn_blocked
+      ? ` <span class="badge b-sell" style="font-size:9px">業績 ${r.earn_pub_type === 'BEFORE' ? '盤前' : '盤後'}</span>`
+      : '';
+    const orderBtn = r.earn_blocked
+      ? `<button class="btn-xs-cancel" style="padding:4px 10px;font-size:11px;opacity:.75;cursor:not-allowed" disabled title="業績日，禁止下單">業績 ${r.earn_pub_type === 'BEFORE' ? '盤前' : '盤後'}</button>`
+      : !connected
+        ? `<button class="btn-blue" style="padding:4px 10px;font-size:11px;opacity:.5;cursor:not-allowed" disabled>Order</button>`
+        : held
+          ? `<button class="btn" style="padding:4px 10px;font-size:11px;opacity:.5;cursor:not-allowed" disabled>Held</button>`
+          : ordered
+            ? `<button class="btn" style="padding:4px 10px;font-size:11px;opacity:.5;cursor:not-allowed" disabled>Ordered</button>`
+            : `<button class="btn-blue" style="padding:4px 10px;font-size:11px" onclick="fOrder('${esc(code)}','${esc(todayOpen)}')">Order</button>`;
     return `<tr>
       <td class="f-idx mono">${i+1}</td>
-      <td class="f-code">${esc(code)}</td>
+      <td class="f-code">${esc(code)}${earnBadge}</td>
       <td class="f-sep tr mono">${fFmtPrice(r.prev_open)}</td>
       <td class="tr mono">${fFmtPrice(r.prev_high)}</td>
       <td class="tr mono">${fFmtPrice(r.prev_low)}</td>
@@ -1519,6 +1524,8 @@ function fRender() {
 
 async function fOrder(symbol, todayOpen) {
   if (!connected) { toast('Not connected to IB', 'err'); return; }
+  const row = fData.find(r => (r.code ?? '').replace(/^US\./, '').toUpperCase() === String(symbol).toUpperCase());
+  if (row && row.earn_blocked) { toast(`${symbol}: 業績日，禁止下單 (earnings)`, 'err'); return; }
   const quick = document.getElementById('o-quick');
   quick.value = 'Loading...';
   try {
@@ -1589,14 +1596,15 @@ async function fOrderAll() {
   const side = document.getElementById('f-order-side').value; // 'long' | 'short' | 'both'
   const toOrder = fRenderedRows.filter(r => {
     const code = (r.code ?? '').replace(/^US\./, '').toUpperCase();
-    return !posSyms.has(code) && !ordSyms.has(code);
+    return !posSyms.has(code) && !ordSyms.has(code) && !r.earn_blocked;
   });
-  if (!toOrder.length) { toast('All rows already held or ordered', 'info'); return; }
-  if (!confirm(`Order ${toOrder.length} of ${fRenderedRows.length} stocks? (${fRenderedRows.length - toOrder.length} held/ordered)`)) return;
+  if (!toOrder.length) { toast('All rows already held, ordered or blocked', 'info'); return; }
+  if (!confirm(`Order ${toOrder.length} of ${fRenderedRows.length} stocks? (${fRenderedRows.length - toOrder.length} held/ordered/blocked)`)) return;
 
   let placed = 0, failed = 0;
   for (const r of toOrder) {
     const code = (r.code ?? '').replace(/^US\./, '');
+    if (r.earn_blocked) { toast(`${code}: 業績日，禁止下單 (earnings)`, 'err'); continue; }
     try {
       const rr = await fetch(PREDICT_URL, {
         method: 'POST',

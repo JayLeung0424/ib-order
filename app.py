@@ -397,6 +397,202 @@ app = FastAPI(title="IB Order Manager", lifespan=lifespan)
 FUTU_QUOTE_HOST = "127.0.0.1"
 FUTU_QUOTE_PORT = 11111
 FUTU_GROUP = "TOP LIST"
+FUTU_EARNINGS_MARKET = "US"
+
+# --- Earnings-day (業績日) block -------------------------------------------
+# When the TOP-LIST is fetched we also ask Futu for the US earnings calendar
+# and flag any symbol that reports TODAY pre-market (BEFORE) or on the previous
+# trading day post-market (AFTER).  Flagged symbols are prohibited from trading
+# (enforced server-side in place_order and mirrored in the UI).  Symbols missing
+# from Futu's calendar fall back to a per-symbol yfinance earnings check
+# (_yf_earn_block).
+import re  # threading is already imported at module level above
+
+_EARN_CACHE = {"fetched_at": None, "map": {}}   # norm-symbol -> {"earnings_date","pub_type"}
+_EARN_LOCK = threading.Lock()
+_EARN_TTL = 300  # seconds
+_EARN_RE_COPY = re.compile(r'[\s.\-]+')
+
+# --- yfinance per-symbol fallback ------------------------------------------
+# Futu's US earnings calendar sometimes misses symbols entirely (e.g. PLD
+# 2026Q3 on 2026-10-15).  yfinance's Ticker.earnings_dates gives a tz-aware
+# earnings history per symbol; used as fallback for symbols missing from the
+# Futu calendar.  Cached per symbol (success and failure) to respect Yahoo
+# rate limits.
+_YF_CACHE: dict = {}   # norm-symbol -> {"block": dict|None, "fetched_at": datetime}
+_YF_LOCK = threading.Lock()
+_YF_TTL = 1800         # seconds
+
+
+def _yf_earn_block(sym: str, today=None, prev=None):
+    """yfinance fallback block info for one symbol, or None.
+
+    Mirrors the Futu literal-day rule: BEFORE (release time < 09:30 ET) on
+    today, or AFTER (release time >= 16:00 ET) on the previous trading day.
+    Returns {"earnings_date": "YYYY-MM-DD", "pub_type": "BEFORE"|"AFTER"} or
+    None.  Results (including misses) are cached for _YF_TTL seconds; when
+    today/prev are supplied explicitly the cache is bypassed (testability).
+    """
+    from datetime import timedelta as _td
+
+    key = _norm_earn_symbol(sym)
+    if not key:
+        return None
+    explicit = today is not None and prev is not None
+    if not explicit:
+        p, t = _earnings_window_dates()          # (prev, today)
+        prev, today = p, t
+    now = datetime.now(tz=_EASTERN)
+    if not explicit:
+        with _YF_LOCK:
+            e = _YF_CACHE.get(key)
+            if e is not None and (now - e["fetched_at"]).total_seconds() < _YF_TTL:
+                b = e["block"]
+                return dict(b) if b else None
+    block = None
+    try:
+        import yfinance as yf
+        ticker_sym = str(sym).replace(" ", "-")   # IB 'BRK B' -> yfinance 'BRK-B'
+        df = yf.Ticker(ticker_sym).earnings_dates
+        if df is not None and len(df):
+            import pandas as _pd
+            for idx in df.index:
+                ts = idx.to_pydatetime() if hasattr(idx, "to_pydatetime") else idx
+                if ts is None or _pd.isna(ts):
+                    continue
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=_EASTERN)   # Yahoo times are ET
+                ts_et = ts.astimezone(_EASTERN)
+                hh = ts_et.hour + ts_et.minute / 60.0
+                if hh < 9.5:
+                    pt = "BEFORE"
+                elif hh >= 16.0:
+                    pt = "AFTER"
+                else:
+                    pt = "REGULAR"
+                ed = ts_et.date().isoformat()
+                if (pt == "BEFORE" and ed == today) or (pt == "AFTER" and ed == prev):
+                    block = {"earnings_date": ed, "pub_type": pt}
+                    break
+    except Exception as exc:
+        print(f"[earnings] yfinance fallback failed for {sym}: {exc}")
+        if not explicit:
+            with _YF_LOCK:
+                _YF_CACHE[key] = {"block": None, "fetched_at": now - _td(seconds=_YF_TTL * 0.9)}
+        return None
+    if not explicit:
+        with _YF_LOCK:
+            _YF_CACHE[key] = {"block": block, "fetched_at": now}
+    return dict(block) if block else None
+
+
+def _norm_earn_symbol(sym) -> str:
+    """Normalize IB symbol ('BRK B') / futu code ('US.BRK.B') to a comparable key ('BRKB')."""
+    return _EARN_RE_COPY.sub("", str(sym or "").upper())
+
+
+def _earnings_window_dates() -> tuple[str, str]:
+    """(prev_trading_day, today) as 'yyyy-MM-dd' in ET, skipping weekends."""
+    now = datetime.now(tz=_EASTERN)
+    today = now.date()
+    prev = today - timedelta(days=1)
+    while prev.weekday() >= 5:          # skip Sat(5)/Sun(6)
+        prev = prev - timedelta(days=1)
+    return (prev.isoformat(), today.isoformat())
+
+
+def _earrows_fetch(quote_ctx, begin_date, end_date) -> dict:
+    """Query Futu's US earnings calendar and return ONLY the blocked symbols.
+
+    Sync; assumes an already-open quote context.  Returns
+    {norm-symbol: {"earnings_date", "pub_type"}} and {} on any failure.
+    """
+    from futu import RET_OK
+
+    try:
+        ret, data = quote_ctx.get_earnings_calendar(
+            market=FUTU_EARNINGS_MARKET, begin_date=begin_date, end_date=end_date
+        )
+    except Exception as exc:
+        print(f"[earnings] get_earnings_calendar failed: {exc}")
+        return {}
+    if ret != RET_OK:
+        print(f"[earnings] get_earnings_calendar ret != RET_OK: {data}")
+        return {}
+
+    prev, today = _earnings_window_dates()
+    out: dict = {}
+    try:
+        records = data.to_dict(orient="records") if hasattr(data, "to_dict") else []
+    except Exception as exc:
+        print(f"[earnings] parse failed: {exc}")
+        return {}
+    for row in records:
+        try:
+            sec = str(row.get("security") or "")
+            code = sec[3:] if sec.startswith("US.") else sec
+            key = _norm_earn_symbol(code)
+            pt = str(row.get("pub_type") or "").upper()
+            ed = str(row.get("earnings_date") or "")
+            # Literal-day rule: BEFORE on today, or AFTER on the previous
+            # trading day.  No widening.
+            if (pt == "BEFORE" and ed == today) or (pt == "AFTER" and ed == prev):
+                out[key] = {"earnings_date": ed, "pub_type": pt}
+        except Exception:
+            continue
+    return out
+
+
+def _earnings_block_map() -> dict:
+    """Return the cached {norm-symbol: {...}} earnings-block map.
+
+    Sync; safe to call from a worker thread.  Refreshes from Futu when the
+    cache is older than _EARN_TTL.  On failure it keeps the previous entries
+    and schedules a retry for _EARN_TTL/2 later (never raises).
+    """
+    now = datetime.now(tz=_EASTERN)
+    with _EARN_LOCK:
+        fa = _EARN_CACHE.get("fetched_at")
+        if fa is not None and (now - fa).total_seconds() < _EARN_TTL:
+            return dict(_EARN_CACHE["map"])
+
+    # (Re)build outside the lock so /api/stocks does not serialize on it.
+    quote_ctx = None
+    m = None
+    try:
+        from futu import OpenQuoteContext
+        prev, today = _earnings_window_dates()
+        begin = prev                                   # prev trading day
+        end = (datetime.now(tz=_EASTERN).date() + timedelta(days=1)).isoformat()  # today + 1
+        quote_ctx = OpenQuoteContext(host=FUTU_QUOTE_HOST, port=FUTU_QUOTE_PORT)
+        m = _earrows_fetch(quote_ctx, begin, end)
+    except Exception as exc:
+        print(f"[earnings] refresh failed: {exc}")
+        m = None
+    finally:
+        if quote_ctx is not None:
+            try:
+                quote_ctx.close()
+            except Exception:
+                pass
+
+    with _EARN_LOCK:
+        if not m:
+            # Failure (exception or empty result): retry later but not
+            # instantly; keep any stale entries rather than wiping them.
+            _EARN_CACHE["fetched_at"] = now - timedelta(seconds=_EARN_TTL / 2)
+            return dict(_EARN_CACHE["map"])
+        _EARN_CACHE["fetched_at"] = now
+        _EARN_CACHE["map"] = m
+        return dict(m)
+
+
+async def _earnings_block_async() -> dict:
+    try:
+        await asyncio.to_thread(_earnings_block_map)
+    except Exception as exc:
+        print(f"[earnings] refresh failed: {exc}")
+    return dict(_EARN_CACHE["map"])
 
 
 def _futu_get_stocks(group_name: str = FUTU_GROUP) -> dict:
@@ -476,6 +672,26 @@ def _futu_get_stocks(group_name: str = FUTU_GROUP) -> dict:
                     "prev_volume": prev_volume,
                     "today_open": today_open,
                 })
+
+        try:
+            earn_map = _earnings_block_map()
+        except Exception as exc:
+            print(f"[earnings] block map failed: {exc}")
+            earn_map = {}
+        for r in records:
+            e = earn_map.get(_norm_earn_symbol(str(r.get("code", "")).replace("US.", "")))
+            r["earn_blocked"] = e is not None
+            r["earn_date"] = (e or {}).get("earnings_date")
+            r["earn_pub_type"] = (e or {}).get("pub_type")
+
+        for r in records:
+            if r.get("earn_blocked"):
+                continue
+            fb = _yf_earn_block(str(r.get("code", "")).replace("US.", ""))
+            if fb:
+                r["earn_blocked"] = True
+                r["earn_date"] = fb["earnings_date"]
+                r["earn_pub_type"] = fb["pub_type"]
 
         return {"ok": True, "stocks": records, "groups": groups, "group": group_name}
     finally:
@@ -1009,6 +1225,20 @@ async def overnight_trades_debug(days: int = 60):
 async def place_order(req: OrderRequest):
     if not ib.isConnected():
         raise HTTPException(400, "Not connected to IB")
+
+    # Earnings-day (業績日) gate — block BEFORE-today / AFTER-prev-trading-day.
+    earn_map = await _earnings_block_async()
+    e = earn_map.get(_norm_earn_symbol(req.symbol))
+    if not e:
+        e = await asyncio.to_thread(_yf_earn_block, req.symbol)
+    if e:
+        when = "before market open" if e["pub_type"] == "BEFORE" else "after market close"
+        raise HTTPException(
+            400,
+            f"Order blocked for {req.symbol}: earnings announced {when} "
+            f"({e['earnings_date']}) | {req.symbol} 業績日，禁止下單",
+        )
+
     try:
         contract = _build_contract(req)
         ot = req.order_type.lower()
