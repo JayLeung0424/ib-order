@@ -288,6 +288,96 @@
     #f-order-all { padding: 4px; }
     #f-order-side { font-size: 10px; padding: 2px 3px; margin-right: 4px; background: var(--bg3); color: var(--text); border: 1px solid var(--border); border-radius: var(--r); }
     .f-spin { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--border); border-top-color: var(--blue); border-radius: 50%; animation: blink 1s linear infinite; vertical-align: -2px; margin-right: 5px; }
+
+    /* ── Black-swan alert banner ───────────────────────────────────── */
+    .bs-banner {
+      display: none;
+      align-items: center;
+      gap: 10px;
+      background: rgba(248,81,73,.14);
+      border: 1px solid var(--red);
+      color: var(--red);
+      font-weight: 700;
+      font-size: 13px;
+      padding: 10px 16px;
+      border-radius: var(--r);
+      margin-bottom: 14px;
+      animation: blink 1.2s ease-in-out infinite;
+    }
+    .bs-banner.on { display: flex; }
+
+    /* Black-swan detector status pill (header, centered, big) */
+    .status-pill.bs-pill {
+      position: absolute;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 16px;
+      font-weight: 700;
+      padding: 8px 22px;
+      border-radius: 22px;
+      gap: 9px;
+      max-width: 40vw;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      cursor: default;
+    }
+    .status-pill.bs-pill.bs-watch {
+      color: var(--yellow);
+      border-color: rgba(227,179,65,.5);
+    }
+    .status-pill.bs-pill.bs-alarm {
+      color: var(--red);
+      border-color: var(--red);
+      background: rgba(248,81,73,.14);
+      font-weight: 700;
+      animation: blink 1.2s ease-in-out infinite;
+    }
+    .status-pill.bs-pill.bs-severe {
+      color: #fff;
+      border-color: var(--red);
+      background: var(--red);
+      font-weight: 700;
+      animation: blink 1.2s ease-in-out infinite;
+    }
+    .status-pill.bs-pill.bs-severe .status-dot {
+      background: #fff;
+      box-shadow: 0 0 5px #fff;
+    }
+
+    /* Black-swan condition breakdown panel (click pill to toggle) */
+    #bs-panel {
+      display: none;
+      position: fixed;
+      top: 58px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 150;
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: var(--r);
+      padding: 10px 16px;
+      min-width: 360px;
+      max-width: 92vw;
+      box-shadow: 0 6px 22px rgba(0,0,0,.5);
+      font-size: 13px;
+    }
+    #bs-panel.open { display: block; }
+    #bs-panel .bs-h {
+      font-size: 10px; text-transform: uppercase; letter-spacing: .5px;
+      color: var(--muted); font-weight: 700; margin-bottom: 6px;
+    }
+    #bs-panel .bs-li {
+      display: flex; align-items: baseline; gap: 10px;
+      padding: 3px 0; color: var(--muted);
+    }
+    #bs-panel .bs-li.hit { color: var(--red); font-weight: 700; }
+    #bs-panel .bs-li.mk { width: 18px; flex: 0 0 auto; text-align: center; }
+    .status-pill.bs-pill.bs-alarm .status-dot {
+      background: var(--red);
+      box-shadow: 0 0 5px var(--red);
+      animation: blink 1.2s ease-in-out infinite;
+    }
   </style>
 </head>
 <body>
@@ -302,6 +392,10 @@
     Auto
   </div>
   <button class="btn" onclick="refreshAll()" title="Manual refresh">↻ Refresh</button>
+  <div id="bs-pill" class="status-pill bs-pill" title="黑天鵝偵測（每日 09:29 一次）" onclick="bsTogglePanel()">
+    <div class="status-dot"></div>
+    <span id="bs-pill-txt">黑天鵝偵測: 未開始</span>
+  </div>
   <div class="status-pill">
     <div id="dot" class="status-dot"></div>
     <span id="status-txt">Disconnected</span>
@@ -329,6 +423,11 @@
 
 <!-- ════════════════════════════ MAIN PAGE ══════════════════════════════ -->
 <div class="page">
+
+  <!-- Black-swan alert banner (5-min big move) -->
+  <div id="bs-banner" class="bs-banner">
+    <span>⚠️</span><span id="bs-msg"></span>
+  </div>
 
   <!-- Account cards -->
   <div class="cards">
@@ -623,7 +722,7 @@
                 <th data-k="prev_volume">前一天成交量<span class="arr">▾</span></th>
                 <th class="f-sep" data-k="today_open">今日開市<span class="arr">▾</span></th>
                 <th>漲跌</th>
-                <th class="f-sep" id="f-order-all" style="text-align:right"><select id="f-order-side"><option value="both" selected>Both</option><option value="long">Long</option><option value="short">Short</option></select><button class="btn-blue" style="padding:4px 10px;font-size:11px;pointer-events:none">ORDER ALL</button></th>
+                <th class="f-sep" id="f-order-all" style="text-align:right"><select id="f-order-side" title="否：兩邊落單。是：方向單 — 中位數=(多單SL+空單SL)/2；開市價 ≥ 中位×1.002 → 做多；開市價 ≤ 中位×0.998 → 做空；其餘（±0.2% 內）→ 兩邊都不下單"><option value="directed" selected>是（方向單）</option><option value="both">否（兩邊落單）</option></select><button class="btn-blue" style="padding:4px 10px;font-size:11px;pointer-events:none">ORDER ALL</button></th>
               </tr></thead>
               <tbody></tbody>
             </table>
@@ -636,6 +735,12 @@
 </div><!-- /page -->
 
 <div id="toasts"></div>
+
+<!-- Black-swan condition breakdown panel (toggle via header pill) -->
+<div id="bs-panel">
+  <div class="bs-h">黑天鵝條件檢視 · <span id="bs-panel-time"></span></div>
+  <div id="bs-panel-list"></div>
+</div>
 
 <!-- ═══════════════════════════════ JS ══════════════════════════════════ -->
 <script>
@@ -668,6 +773,98 @@ if (_bc) {
       if (ord) { _lastOrders = ord; renderOrders(ord); }
     }
   };
+}
+
+/* ── Black-swan advisory ─────────────────────────────────────────────── */
+// When the once-daily (09:29 ET) detector is tripped, an alert banner is
+// shown but orders are NOT blocked — bsGuard() asks the user to confirm
+// before each order submit.
+let bsBlocked = false;
+let bsTimer = null;
+const BS_POLL = 3000;
+
+async function bsPoll() {
+  try {
+    const s = await (await fetch('/api/blackswan')).json();
+    bsUpdateUI(s);
+  } catch(e) { /* keep last state; next tick retries */ }
+}
+
+let _lastBsState = null;
+
+function bsTogglePanel() {
+  document.getElementById('bs-panel').classList.toggle('open');
+  if (_lastBsState) bsRenderPanel(_lastBsState);
+}
+
+function bsRenderPanel(s) {
+  const list = document.getElementById('bs-panel-list');
+  const minH = s.min_hits ?? 3;
+  const t = (s.last_check_et || '').replace('T', ' ').slice(5, 19);
+  document.getElementById('bs-panel-time').textContent = `上次檢測 ${t}`;
+  const obs = (s.observations || []);
+  list.innerHTML = obs.length
+    ? obs.map(o => `
+      <div class="bs-li ${o.hit ? 'hit' : ''}">
+        <span class="mk">${o.hit ? '✅' : '✗'}</span><span>${o.label || ''}</span>
+      </div>`).join('')
+    : '<div class="bs-li"><span>尚無數據（偵測器未開始）</span></div>';
+  if (s.blocked) {
+    list.insertAdjacentHTML('beforeend',
+      `<div class="bs-li hit" style="margin-top:6px;border-top:1px solid var(--border);padding-top:6px">
+        <span class="mk">${s.severity === 'severe' ? '🚨' : '⚠️'}</span>
+        <span>已命中 ${s.hits_count}/${obs.length} 條件 — 建議今日不下單${s.severity === 'severe' ? ' (嚴重)' : ''}（不封鎖）</span>
+      </div>`);
+  } else {
+    list.insertAdjacentHTML('beforeend',
+      `<div class="bs-li" style="margin-top:6px;border-top:1px solid var(--border);padding-top:6px">
+        <span class="mk">—</span><span>命中 ${s.hits_count ?? 0}/5（需 ≥${minH}）— 正常下單中</span>
+      </div>`);
+  }
+}
+
+function bsUpdateUI(s) {
+  const on = !!(s && s.blocked);
+  bsBlocked = on;
+  if (s) _lastBsState = s;
+  const banner = document.getElementById('bs-banner');
+  if (!banner) return;
+  // ── Header status pill: last check time + hits ──────────────────────
+  const pill = document.getElementById('bs-pill');
+  if (pill && s) {
+    const t = (s.last_check_et || '').replace('T', ' ').slice(5, 19);
+    const hits = s.hits_count ?? (s.details || []).length;
+    const sev = !!(s && s.blocked && s.severity === 'severe');
+    const prefix = on ? (sev ? '🚨🚨' : '⚠️') : '🦢';
+    const tierTxt = on && sev ? ' (嚴重)' : '';
+    pill.classList.toggle('bs-watch', !on && hits > 0);
+    pill.classList.toggle('bs-alarm', on && !sev);
+    pill.classList.toggle('bs-severe', on && sev);
+    pill.title = `黑天鵝偵測（每日 09:29 檢查一次，≥${s.min_hits ?? 3}/5 警示（建議不下單，不封鎖） · ≥${s.severe_hits ?? 4}/5 嚴重）\n上次檢測: ${t}\n`
+      + ((s.observations || []).map(o => o.label).join('\n') || '無數據');
+    document.getElementById('bs-pill-txt').textContent = `${prefix} 黑天鵝 ${hits}/${s.min_hits ?? 3}+${tierTxt} · ${t}`;
+  }
+  // ── Full-width alarm banner only when blocked ────────────────────────
+  if (on) {
+    const severe = s.severity === 'severe';
+    const det = (s.details || []).map(d => `✅ ${d.label || ''}`).filter(x => x).join('  ·  ');
+    document.getElementById('bs-msg').textContent =
+      `${severe ? '🚨 ' : ''}黑天鵝警報${severe ? '（嚴重）' : ''}（${(s.details || []).length}/${s.severe_hits ?? 4} 條件）：${det || '市場條件觸發'} — 建議今日不下單（不封鎖，可自行判斷）`;
+    banner.classList.add('on');
+  } else {
+    banner.classList.remove('on');
+  }
+  if (s && document.getElementById('bs-panel').classList.contains('open')) bsRenderPanel(s);
+}
+
+// Advisory only: when black swan is active, ask for confirmation before
+// each order submit.  Cancelling returns true (submit refused); confirming
+// returns false (submit proceeds).  Buttons are never disabled.
+function bsGuard() {
+  if (bsBlocked) {
+    return !confirm('⚠️ 黑天鵝警報：市場條件觸發，建議今日不下單。\n確定要繼續下單？');
+  }
+  return false;
 }
 
 /* ── API ─────────────────────────────────────────────────────────────── */
@@ -911,7 +1108,7 @@ function renderPositions(rows) {
       <td class="tr mono">${Math.round(p.market_value * posFx).toLocaleString('en-US')}</td>
       <td class="tr mono ${upClass}">${Math.round(p.unrealized_pnl * posFx).toLocaleString('en-US')}</td>
       <td class="tr mono ${rpClass}">${Math.round(p.realized_pnl * posFx).toLocaleString('en-US')}</td>
-      <td><button class="btn-xs-cancel" onclick="doClosePosition(${JSON.stringify(p.symbol)},${JSON.stringify(p.sec_type)},${exchArg},${curArg},'${closeAction}',${closeQty})">平倉</button></td>
+      <td><button class="btn-xs-cancel" onclick="doClosePosition(${JSON.stringify(p.symbol)},${JSON.stringify(p.sec_type)},${exchArg},${curArg},'${closeAction}',${closeQty})" ${bsBlocked ? 'title="黑天鵝警報：建議不下單"' : ''}>平倉</button></td>
     </tr>`;
   }).join('');
   if (typeof fRender === 'function' && typeof fData !== 'undefined' && fData.length) fRender();
@@ -919,6 +1116,7 @@ function renderPositions(rows) {
 
 /* ── Close position ──────────────────────────────────────────────────── */
 async function doClosePosition(symbol, secType, exchange, currency, action, qty) {
+  if (bsGuard()) return;
   if (!confirm(`平倉 ${action} ${qty} ${symbol} @ Market?`)) return;
   try {
     await api('POST', '/api/orders', {
@@ -1073,6 +1271,7 @@ function frmUpdate() {
 }
 
 async function placeOrder(action) {
+  if (bsGuard()) return;
   const sec = document.getElementById('o-sec').value;
   const ot  = document.getElementById('o-type').value;
   const sym = _normSymbol(document.getElementById('o-sym').value, sec);
@@ -1151,6 +1350,7 @@ function _normSymbol(sym, secType) {
 }
 
 async function quickPlace() {
+  if (bsGuard()) return;
   const raw = document.getElementById('o-quick').value.trim();
   if (!raw) return;
 
@@ -1291,6 +1491,7 @@ async function csvLoad(input) {
 }
 
 async function csvPlace() {
+  if (bsGuard()) return;
   if (!_csvText) return;
   if (!confirm(`Place all CSV orders?`)) return;
   let r;
@@ -1506,7 +1707,7 @@ function fRender() {
           ? `<button class="btn" style="padding:4px 10px;font-size:11px;opacity:.5;cursor:not-allowed" disabled>Held</button>`
           : ordered
             ? `<button class="btn" style="padding:4px 10px;font-size:11px;opacity:.5;cursor:not-allowed" disabled>Ordered</button>`
-            : `<button class="btn-blue" style="padding:4px 10px;font-size:11px" onclick="fOrder('${esc(code)}','${esc(todayOpen)}')">Order</button>`;
+            : `<button class="btn-blue" style="padding:4px 10px;font-size:11px" ${bsBlocked ? 'title="黑天鵝警報：建議不下單"' : ''} onclick="fOrder('${esc(code)}','${esc(todayOpen)}')">Order</button>`;
     return `<tr>
       <td class="f-idx mono">${i+1}</td>
       <td class="f-code">${esc(code)}${earnBadge}</td>
@@ -1523,6 +1724,7 @@ function fRender() {
 }
 
 async function fOrder(symbol, todayOpen) {
+  if (bsGuard()) return;
   if (!connected) { toast('Not connected to IB', 'err'); return; }
   const row = fData.find(r => (r.code ?? '').replace(/^US\./, '').toUpperCase() === String(symbol).toUpperCase());
   if (row && row.earn_blocked) { toast(`${symbol}: 業績日，禁止下單 (earnings)`, 'err'); return; }
@@ -1589,11 +1791,12 @@ function _parseOrderStr(s) {
 }
 
 async function fOrderAll() {
+  if (bsGuard()) return;
   if (!connected) { toast('Not connected to IB', 'err'); return; }
   if (!fRenderedRows.length) { toast('No rows to order', 'info'); return; }
   const posSyms = new Set(_lastPositions.map(p => String(p.symbol).toUpperCase()));
   const ordSyms = new Set(_lastOrders.map(o => String(o.symbol).toUpperCase()));
-  const side = document.getElementById('f-order-side').value; // 'long' | 'short' | 'both'
+  const side = document.getElementById('f-order-side').value; // 'both'（否：兩邊落單）| 'directed'（是：方向單）
   const toOrder = fRenderedRows.filter(r => {
     const code = (r.code ?? '').replace(/^US\./, '').toUpperCase();
     return !posSyms.has(code) && !ordSyms.has(code) && !r.earn_blocked;
@@ -1601,7 +1804,7 @@ async function fOrderAll() {
   if (!toOrder.length) { toast('All rows already held, ordered or blocked', 'info'); return; }
   if (!confirm(`Order ${toOrder.length} of ${fRenderedRows.length} stocks? (${fRenderedRows.length - toOrder.length} held/ordered/blocked)`)) return;
 
-  let placed = 0, failed = 0;
+  let placed = 0, failed = 0, skipped = 0;
   for (const r of toOrder) {
     const code = (r.code ?? '').replace(/^US\./, '');
     if (r.earn_blocked) { toast(`${code}: 業績日，禁止下單 (earnings)`, 'err'); continue; }
@@ -1615,13 +1818,28 @@ async function fOrderAll() {
       const j = await rr.json();
       const strat = j?.simple_strategy;
       if (!strat) throw new Error('no simple_strategy');
-      const both = side === 'both' ? strat.entry_both_side !== false : false;
-      const sides = side === 'short' ? [['SELL', strat.short_order]]
-        : side === 'long' ? [['BUY', strat.long_order]]
-        : [
+      let sides;
+      if (side === 'directed') {
+        // 方向單：中位數 = (多單SL + 空單SL) / 2
+        // 開市價 ≥ 中位×1.002（≥0.2%）→ 做多；開市價 ≤ 中位×0.998（≤0.2%）→ 做空
+        // 開市價落喺 ±0.2% 區間內 → 兩邊都不下單
+        const lp = _parseOrderStr(strat.long_order);
+        const sp = _parseOrderStr(strat.short_order);
+        if (!lp || !sp) throw new Error('bad order string (need long+short SL)');
+        const open = parseFloat(strat.open_price ?? r.today_open);
+        const med  = (lp.sl + sp.sl) / 2;
+        if (!isFinite(open) || !isFinite(med) || open <= 0) throw new Error('no open price');
+        sides = open >= med * 1.002 ? [['BUY', strat.long_order]]
+              : open <= med * 0.998 ? [['SELL', strat.short_order]]
+              : [];
+      } else {
+        const both = strat.entry_both_side !== false;
+        sides = [
           ['BUY',  strat.long_order],
           ...(both ? [['SELL', strat.short_order]] : []),
         ];
+      }
+      if (!sides.length) { skipped++; continue; }  // 方向單：中位數區間內，兩邊都不下單
       for (const [action, orderStr] of sides) {
         const parsed = _parseOrderStr(orderStr);
         if (!parsed) throw new Error(`bad ${action} order string: ${orderStr}`);
@@ -1631,7 +1849,7 @@ async function fOrderAll() {
       }
     } catch(e) { failed++; toast(`${code}: ${e.message}`, 'err'); }
   }
-  toast(`ORDER ALL done: ${placed} orders placed, ${failed} failed`, placed ? 'ok' : 'err');
+  toast(`ORDER ALL done: ${placed} orders placed${skipped ? `, ${skipped} skipped (no direction)` : ''}, ${failed} failed`, placed ? 'ok' : 'err');
   await refreshAll();
 }
 
@@ -1648,7 +1866,9 @@ async function fAdd() {
     const j = await r.json();
     if (!j.ok) { st.className = 'c-red'; st.textContent = j.error || 'Failed'; return; }
     st.className = 'c-grn';
-    st.textContent = 'Added ' + (j.codes||[]).map(c => c.replace(/^US\./,'')).join(', ');
+    const added = "Added " + (j.codes||[]).map(c => c.replace(/^US\./,'')).join(', ');
+    const skipped = (j.skipped && j.skipped.length) ? ' (skipped: ' + j.skipped.join(', ') + ')' : '';
+    st.textContent = added + skipped;
     document.getElementById('f-add').value = '';
     fLoad();
   } catch(e) { st.className = 'c-red'; st.textContent = e; }
@@ -1714,6 +1934,8 @@ function fInit() {
 document.addEventListener('DOMContentLoaded', () => {
   frmUpdate();
   fInit();  // Auto-refresh is on by default — reflect in UI immediately
+  bsPoll();
+  if (!bsTimer) bsTimer = setInterval(bsPoll, BS_POLL);
   document.getElementById('sw').classList.toggle('on', autoOn);
   // Sync connection state; auto-connect using fallback sequence if not already connected
   fetch('/api/status').then(r => r.json()).then(d => {

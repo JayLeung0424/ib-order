@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 import urllib.request
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -376,8 +377,17 @@ async def lifespan(app: FastAPI):
     # IB's reqExecutions only returns same-day fills, so we must keep our own
     # log of yesterday's opening fills to match against today's closing fills.
     ib.execDetailsEvent += lambda trade, fill: _record_fill(fill)
+    # Black-swan detector: poll Futu snapshots in the background.
+    global _bs_task
+    _bs_task = asyncio.create_task(_bs_loop())
     yield
     # ── Graceful shutdown ──────────────────────────────────────────────
+    if _bs_task is not None:
+        _bs_task.cancel()
+        try:
+            await _bs_task
+        except (asyncio.CancelledError, Exception):
+            pass
     try:
         if ib.isConnected():
             ib.disconnect()
@@ -701,6 +711,9 @@ def _futu_get_stocks(group_name: str = FUTU_GROUP) -> dict:
 def _futu_add_stocks(group_name: str, code_list: list) -> dict:
     from futu import OpenQuoteContext, ModifyUserSecurityOp, RET_OK
     full_list = ["US." + c for c in code_list]
+    # 類股代號從 screener／紙front 來係連字符（BF-B = Berkshire B，舊 BRK-B 同 BRK.A→BF.A 一樣）；
+    # futu user-security 用點號（US.BF.B / US.BRK.B），連字符會報「未知股票」。
+    futu_list = ["US." + c.replace("-", ".") for c in code_list]
     quote_ctx = OpenQuoteContext(host=FUTU_QUOTE_HOST, port=FUTU_QUOTE_PORT)
     try:
         ret, data = quote_ctx.get_user_security(group_name)
@@ -709,10 +722,34 @@ def _futu_add_stocks(group_name: str, code_list: list) -> dict:
             if existing:
                 quote_ctx.modify_user_security(group_name, ModifyUserSecurityOp.DEL, existing)
         ret, err = quote_ctx.modify_user_security(
-            group_name, ModifyUserSecurityOp.ADD, list(reversed(full_list))
+            group_name, ModifyUserSecurityOp.ADD, list(reversed(futu_list))
         )
         if ret != RET_OK:
-            return {"ok": False, "error": str(err)}
+            # futu 成批拒絕：從 error 抽出唔識嘅代碼，剔走後重試，唔會因一隻卡住全部
+            _e = str(err)
+            bad = {b.upper().strip() for b in re.findall(r"(?:未知股票|unknown stock[^\s]*)\s*([\w.\-/]+)", _e)}
+            if bad:
+                def _norm(b):
+                    return str(b).upper().replace("US.", "").replace(".", "-")
+                bad_keys = {_norm(b) for b in bad}
+                kept_futu, kept = [], []
+                for c, f in zip(code_list, futu_list):
+                    if _norm(c) not in bad_keys:
+                        kept.append("US." + c)
+                        kept_futu.append(f)
+                if kept:
+                    # 重冇以下事故重疊/重複：reload 現有 group → DEL 晒 → ADD kept
+                    ret_c, data_c = quote_ctx.get_user_security(group_name)
+                    if ret_c == RET_OK:
+                        cur = data_c["code"].tolist() if hasattr(data_c, "columns") and "code" in data_c.columns else []
+                        if cur:
+                            quote_ctx.modify_user_security(group_name, ModifyUserSecurityOp.DEL, cur)
+                    ret2, err2 = quote_ctx.modify_user_security(
+                        group_name, ModifyUserSecurityOp.ADD, list(reversed(kept_futu))
+                    )
+                    if ret2 == RET_OK:
+                        return {"ok": True, "codes": kept, "skipped": sorted(bad_keys)}
+            return {"ok": False, "error": _e}
         return {"ok": True, "codes": full_list}
     finally:
         quote_ctx.close()
@@ -776,6 +813,302 @@ async def api_add_stock(req: FutuAddRequest):
         return await asyncio.to_thread(_futu_add_stocks, FUTU_GROUP, code_list)
     except Exception as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+
+
+# ---------------------------------------------------------------------------
+# Black-swan detector (once-daily market-regime check → block ALL orders)
+# ---------------------------------------------------------------------------
+# A lightweight circuit breaker.  Once per trading day — at 09:29 ET, one
+# minute before the US cash open — a set of market conditions is evaluated
+# via yfinance (free, already a dependency; Futu OpenAPI does not cover US
+# futures/index quotes).  If ANY condition fires, a black-swan alert is
+# raised — this is ADVISORY ONLY: orders are NOT blocked.  The alert is
+# surfaced via Telegram and the UI (banner + status pill) and the user
+# decides whether to place orders.
+#
+# Conditions (configurable via env):
+#   1. NQ futures gap (last close vs prev close)  |move| > BS_NQ_GAP_PCT   (1.5 %)
+#   2. VIX level > BS_VIX_LEVEL (18) AND overnight rise > BS_VIX_MOVE_PCT (5 %)
+#   3. Crude oil (CL=F) overnight move |move| > BS_OIL_MOVE_PCT           (3 %)
+#   4. Nikkei (^N225) OR HSI (^HSI) overnight move > BS_ASIA_MOVE_PCT     (2 %)
+#   5. S&P 500 (^GSPC) own-day move |move| > BS_SPX_MOVE_PCT              (1.5 %)
+# TWO-TIER BLACK SWAN (same blocking either way):
+#   hits >= BS_MIN_HITS (3)  → "normal"  block (orders disabled)
+#   hits >= BS_SEVERE_HITS(4) → "severe" block (orders disabled + red alerts)
+# The block auto-clears at the 16:00 ET cash close (see _bs_loop); the next
+# check runs at 09:29 ET the following trading day.
+
+BS_CHECK_TIME = os.environ.get("BS_CHECK_TIME", "09:29")   # once-daily check
+BS_CHECK_HOUR, BS_CHECK_MIN = (int(x) for x in BS_CHECK_TIME.split(":"))
+BS_CLOSE_HOUR, BS_CLOSE_MIN = 16, 0                        # 16:00 ET cash close
+# If the server starts/shortly restarts after the check time, a start within
+# this grace (seconds) still counts as today's check instead of skipping it.
+BS_CHECK_GRACE = int(os.environ.get("BS_CHECK_GRACE", "300"))
+
+BS_NQ_GAP_PCT   = float(os.environ.get("BS_NQ_GAP_PCT",   "1.5"))
+BS_VIX_LEVEL    = float(os.environ.get("BS_VIX_LEVEL",    "18"))
+BS_VIX_MOVE_PCT = float(os.environ.get("BS_VIX_MOVE_PCT", "5"))
+BS_OIL_MOVE_PCT = float(os.environ.get("BS_OIL_MOVE_PCT", "3"))
+BS_ASIA_MOVE_PCT= float(os.environ.get("BS_ASIA_MOVE_PCT","2"))
+BS_SPX_MOVE_PCT = float(os.environ.get("BS_SPX_MOVE_PCT", "1.5"))
+BS_MIN_HITS     = int(os.environ.get("BS_MIN_HITS",     "3"))  # >=3 of 5 → black swan
+BS_SEVERE_HITS  = int(os.environ.get("BS_SEVERE_HITS",  "4"))  # >=4 of 5 → severe tier
+# Legacy: only relevant when checks ran repeatedly; with once-daily checks it
+# simply guarantees each new day's check re-evaluates from scratch.
+BLACK_SWAN_CALM = int(os.environ.get("BLACK_SWAN_CALM", "300"))
+
+
+def _bs_next_check_dt(now: Optional[datetime] = None) -> datetime:
+    """Next scheduled once-daily check datetime in ET (today 09:29 if still
+    ahead or within the grace window, else tomorrow 09:29)."""
+    now = now or datetime.now(tz=_EASTERN)
+    target = now.replace(hour=BS_CHECK_HOUR, minute=BS_CHECK_MIN,
+                         second=0, microsecond=0)
+    if now > target + timedelta(seconds=BS_CHECK_GRACE):
+        target += timedelta(days=1)
+    return target
+
+
+def _bs_next_close_dt(now: Optional[datetime] = None) -> datetime:
+    """Next 16:00 ET cash close (today if still ahead, else tomorrow)."""
+    now = now or datetime.now(tz=_EASTERN)
+    target = now.replace(hour=BS_CLOSE_HOUR, minute=BS_CLOSE_MIN,
+                         second=0, microsecond=0)
+    if now >= target:
+        target += timedelta(days=1)
+    return target
+
+
+def _bs_clear_block_locked() -> None:
+    """Reset the block state; caller must hold _bs_lock."""
+    _bs_state["blocked"] = False
+    _bs_state["severity"] = "normal"
+    _bs_state["since_et"] = None
+    _bs_state["last_hit_ts"] = None
+    _bs_state["details"] = []
+
+_bs_lock = threading.Lock()
+_bs_state = {
+    "blocked":       False,
+    "severity":      "normal",   # "normal" (>=3 hits) | "severe" (>=4 hits)
+    "since_et":      None,       # datetime the block first engaged
+    "last_check_et": None,       # datetime of the most recent check
+    "hits_count":    0,          # how many conditions hit last check
+    "observations":  [],         # all 4 conditions' current readings
+    "details":       [],         # [{"label", "pct", "value", "prev"}]
+    "last_hit_ts":   None,       # monotonic ts of the last triggering check
+}
+_bs_task: Optional["asyncio.Task"] = None
+
+
+def _bs_is_blocked() -> bool:
+    with _bs_lock:
+        return _bs_state["blocked"]
+
+
+def _bs_day_change(sym: str):
+    """Return (last_close, prev_close) from yfinance daily history, or None."""
+    try:
+        import yfinance as yf
+        df = yf.Ticker(sym).history(period="5d", interval="1d")
+        if df is None:
+            return None
+        closes = df["Close"].dropna()
+        if len(closes) >= 2:
+            return float(closes.iloc[-1]), float(closes.iloc[-2])
+    except Exception as exc:
+        print(f"[blackswan] fetch {sym} failed: {exc}")
+    return None
+
+
+def _bs_calc_pct(name, last, prev, hit=False):
+    """Build an observation entry {label, pct, value, prev, hit}; None-safe."""
+    pct = ((last - prev) / prev * 100.0) if prev else None
+    return {"label": name, "pct": pct, "value": last, "prev": prev, "hit": hit}
+
+
+def _bs_check_conditions() -> tuple:
+    """Evaluate the four black-swan conditions via yfinance.
+
+    Returns (hits, observations): `hits` is the subset of `observations`
+    that triggers the block.  Never raises.
+    """
+    observations = []
+
+    # 1. NQ futures gap (last vs previous close)
+    nq = _bs_day_change("NQ=F")
+    if nq:
+        pct = (nq[0] - nq[1]) / nq[1] * 100.0 if nq[1] else None
+        hit = pct is not None and abs(pct) > BS_NQ_GAP_PCT
+        observations.append({
+            "label": f"NQ 裂口 {pct:+.2f}%" if pct is not None else "NQ 補口",
+            "pct": pct, "value": nq[0], "prev": nq[1], "hit": hit,
+        })
+    else:
+        observations.append({"label": "NQ 裂口（無數據）", "pct": None, "value": None, "prev": None, "hit": False})
+
+    # 2. VIX pre-market level > threshold AND overnight rise > threshold
+    vix = _bs_day_change("^VIX")
+    if vix:
+        pct = (vix[0] - vix[1]) / vix[1] * 100.0 if vix[1] else None
+        hit = vix[0] > BS_VIX_LEVEL and pct is not None and pct > BS_VIX_MOVE_PCT
+        observations.append({
+            "label": f"VIX {vix[0]:.1f}（>{BS_VIX_LEVEL:.0f} 且升 {pct:+.2f}%）" if pct is not None else f"VIX {vix[0]:.1f}",
+            "pct": pct, "value": vix[0], "prev": vix[1], "hit": hit,
+        })
+    else:
+        observations.append({"label": "VIX（無數據）", "pct": None, "value": None, "prev": None, "hit": False})
+
+    # 3. Crude oil overnight move
+    oil = _bs_day_change("CL=F")
+    if oil:
+        pct = (oil[0] - oil[1]) / oil[1] * 100.0 if oil[1] else None
+        hit = pct is not None and abs(pct) > BS_OIL_MOVE_PCT
+        observations.append({
+            "label": f"油價 {pct:+.2f}%" if pct is not None else "油價",
+            "pct": pct, "value": oil[0], "prev": oil[1], "hit": hit,
+        })
+    else:
+        observations.append({"label": "油價（無數據）", "pct": None, "value": None, "prev": None, "hit": False})
+
+    # 4. Asia markets: Nikkei OR HSI overnight move (either one triggers)
+    for label, sym in (("日經", "^N225"), ("恆指", "^HSI")):
+        d = _bs_day_change(sym)
+        if d:
+            pct = (d[0] - d[1]) / d[1] * 100.0 if d[1] else None
+            hit = pct is not None and abs(pct) > BS_ASIA_MOVE_PCT
+            observations.append({
+                "label": f"{label} {pct:+.2f}%" if pct is not None else label,
+                "pct": pct, "value": d[0], "prev": d[1], "hit": hit,
+            })
+        else:
+            observations.append({"label": f"{label}（無數據）", "pct": None, "value": None, "prev": None, "hit": False})
+
+    # 5. S&P 500 own-day move (big-trend day itself)
+    spx = _bs_day_change("^GSPC")
+    if spx:
+        pct = (spx[0] - spx[1]) / spx[1] * 100.0 if spx[1] else None
+        hit = pct is not None and abs(pct) > BS_SPX_MOVE_PCT
+        observations.append({
+            "label": f"SPX {pct:+.2f}%" if pct is not None else "SPX",
+            "pct": pct, "value": spx[0], "prev": spx[1], "hit": hit,
+        })
+    else:
+        observations.append({"label": "SPX（無數據）", "pct": None, "value": None, "prev": None, "hit": False})
+
+    hits = [o for o in observations if o.get("hit")]
+    return hits, observations
+
+
+def _bs_tick() -> None:
+    """One detector cycle: fetch quotes → evaluate conditions → update state.
+
+    Runs in a worker thread (network calls are blocking); never raises.
+    On the first cycle that trips the threshold a Telegram alert is sent.
+    """
+    now_ts = time.monotonic()
+    hits, observations = _bs_check_conditions()
+
+    with _bs_lock:
+        # Black swan only when >= BS_MIN_HITS of the 4 conditions fire together.
+        black_swan = len(hits) >= BS_MIN_HITS
+        first_hit = False
+        if black_swan:
+            first_hit = not _bs_state["blocked"]
+            _bs_state["blocked"] = True
+            _bs_state["last_hit_ts"] = now_ts
+            # Tier escalates with hits; never de-escalates mid-episode
+            # (only reset to "normal" at next first_hit or unblock).
+            if first_hit:
+                _bs_state["severity"] = "severe" if len(hits) >= BS_SEVERE_HITS else "normal"
+            elif len(hits) >= BS_SEVERE_HITS:
+                _bs_state["severity"] = "severe"
+            if _bs_state["since_et"] is None:
+                _bs_state["since_et"] = datetime.now(tz=_EASTERN)
+            _bs_state["details"] = [dict(h) for h in hits]
+        elif (
+            _bs_state["blocked"]
+            and _bs_state["last_hit_ts"] is not None
+            and (now_ts - _bs_state["last_hit_ts"]) >= BLACK_SWAN_CALM
+        ):
+            # Fewer hits remains blocking until CALM passes, so a flickering
+            # 2-of-4 situation does not flap the gate open every 5 minutes.
+            _bs_state["blocked"] = False
+            _bs_state["since_et"] = None
+            _bs_state["details"] = []
+            _bs_state["severity"] = "normal"
+        elif _bs_state["blocked"]:
+            # Still blocked (within calm), fewer hits: keep the current hits
+            # visible so the UI shows the tail end of the episode.
+            _bs_state["details"] = [dict(h) for h in hits]
+
+        blocked_now = _bs_state["blocked"]
+        _bs_state["last_check_et"] = datetime.now(tz=_EASTERN)
+        _bs_state["hits_count"] = len(hits)
+        _bs_state["observations"] = [dict(o) for o in observations]
+        details = _bs_state["details"] if (first_hit and blocked_now) else []
+
+    if details:                      # first engagement of this episode
+        tier = ("🚨🚨 BLACK SWAN — SEVERE 🚨🚨" if _bs_state["severity"] == "severe"
+                else "⚠️ BLACK SWAN ALERT ⚠️")
+        lines = "\n".join(str(h["label"]) for h in details)
+        _tg_send(
+            f"{tier}\n{lines}\n建議今日不下單 (advisory — orders NOT blocked)"
+        )
+
+
+async def _bs_loop() -> None:
+    """Background detector loop (async task started in lifespan).
+
+    Runs exactly ONE check per trading day: sleeps until 09:29 ET
+    (one minute before the 09:30 US cash open), evaluates the conditions,
+    then holds any resulting block through the trading day until the
+    16:00 ET close, where it is cleared.  The next check is 09:29 ET the
+    following trading day.
+    """
+    while True:
+        # 1. Sleep until the once-daily check time (09:29 ET by default).
+        wait = (_bs_next_check_dt() - datetime.now(tz=_EASTERN)).total_seconds()
+        await asyncio.sleep(max(0.0, wait))
+        try:
+            await asyncio.to_thread(_bs_tick)
+        except Exception as exc:
+            print(f"[blackswan] tick failed: {exc}")
+        # 2. Sleep until the cash close (16:00 ET); if the check tripped,
+        #    the block stays on for the whole trading day until then.
+        wait = (_bs_next_close_dt() - datetime.now(tz=_EASTERN)).total_seconds()
+        await asyncio.sleep(max(0.0, wait))
+        with _bs_lock:
+            if _bs_state["blocked"]:
+                _bs_clear_block_locked()
+
+
+@app.get("/api/blackswan")
+async def blackswan_state():
+    """Current black-swan block state for the UI (polled every few seconds)."""
+    with _bs_lock:
+        return {
+            "blocked":       _bs_state["blocked"],
+            "severity":      _bs_state["severity"],
+            "min_hits":      BS_MIN_HITS,
+            "severe_hits":   BS_SEVERE_HITS,
+            "since_et":      _bs_state["since_et"].isoformat() if _bs_state["since_et"] else None,
+            "last_check_et": _bs_state["last_check_et"].isoformat() if _bs_state["last_check_et"] else None,
+            "hits_count":    _bs_state["hits_count"],
+            "min_hits":      BS_MIN_HITS,
+            "observations":  [dict(o) for o in _bs_state["observations"]],
+            "thresholds": {
+                "nq_gap_pct":     BS_NQ_GAP_PCT,
+                "vix_level":      BS_VIX_LEVEL,
+                "vix_move_pct":   BS_VIX_MOVE_PCT,
+                "oil_move_pct":   BS_OIL_MOVE_PCT,
+                "asia_move_pct":  BS_ASIA_MOVE_PCT,
+                "spx_move_pct":   BS_SPX_MOVE_PCT,
+                "check_time":     BS_CHECK_TIME,
+                "close_time":     "16:00",
+            },
+            "details":       [dict(d) for d in _bs_state["details"]],
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -1227,6 +1560,7 @@ async def place_order(req: OrderRequest):
         raise HTTPException(400, "Not connected to IB")
 
     # Earnings-day (業績日) gate — block BEFORE-today / AFTER-prev-trading-day.
+    # (Black-swan is advisory only — see _bs_loop / _bs_tick — NOT gated here.)
     earn_map = await _earnings_block_async()
     e = earn_map.get(_norm_earn_symbol(req.symbol))
     if not e:
